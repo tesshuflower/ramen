@@ -191,6 +191,9 @@ spec:
                       are ANDed.
                     type: object
                 type: object
+              volumeReplicationPlugin:
+                description: Volume Replication plugin
+                type: string
             required:
             - drPolicyRef
             - placementRef

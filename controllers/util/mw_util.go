@@ -138,11 +138,50 @@ func (mwu *MWUtil) CreateOrUpdateVRGManifestWork(
 	return mwu.createOrUpdateManifestWork(manifestWork, homeCluster)
 }
 
+func (mwu *MWUtil) CreateOrUpdateVolSyncManifestWork(
+	name, namespace, homeCluster string,
+	drPolicy *rmn.DRPolicy, pvcSelector metav1.LabelSelector) error {
+	schedulingInterval := drPolicy.Spec.SchedulingInterval
+	replClassSelector := drPolicy.Spec.ReplicationClassSelector
+
+	mwu.Log.Info(fmt.Sprintf("Create or Update VolSync manifestwork %s:%s:%s",
+		name, namespace, homeCluster))
+
+	manifestWork, err := mwu.generateVolSyncManifestWork(name, namespace, homeCluster,
+		pvcSelector, schedulingInterval, replClassSelector)
+	if err != nil {
+		return err
+	}
+
+	return mwu.createOrUpdateManifestWork(manifestWork, homeCluster)
+}
+
 func (mwu *MWUtil) generateVRGManifestWork(
 	name, namespace, homeCluster string, s3Profiles []string,
 	pvcSelector metav1.LabelSelector, schedulingInterval string,
 	replClassSelector metav1.LabelSelector) (*ocmworkv1.ManifestWork, error) {
 	vrgClientManifest, err := mwu.generateVRGManifest(name, namespace, s3Profiles,
+		pvcSelector, schedulingInterval, replClassSelector)
+	if err != nil {
+		mwu.Log.Error(err, "failed to generate VolumeReplicationGroup manifest")
+
+		return nil, err
+	}
+
+	manifests := []ocmworkv1.Manifest{*vrgClientManifest}
+
+	return mwu.newManifestWork(
+		fmt.Sprintf(ManifestWorkNameFormat, name, namespace, MWTypeVRG),
+		homeCluster,
+		map[string]string{"app": "VRG"},
+		manifests), nil
+}
+
+func (mwu *MWUtil) generateVolSyncManifestWork(
+	name, namespace, homeCluster string,
+	pvcSelector metav1.LabelSelector, schedulingInterval string,
+	replClassSelector metav1.LabelSelector) (*ocmworkv1.ManifestWork, error) {
+	vrgClientManifest, err := mwu.generateVolSyncManifest(name, namespace,
 		pvcSelector, schedulingInterval, replClassSelector)
 	if err != nil {
 		mwu.Log.Error(err, "failed to generate VolumeReplicationGroup manifest")
@@ -171,6 +210,22 @@ func (mwu *MWUtil) generateVRGManifest(
 			SchedulingInterval:       schedulingInterval,
 			ReplicationState:         rmn.Primary,
 			S3Profiles:               s3Profiles,
+			ReplicationClassSelector: replClassSelector,
+		},
+	})
+}
+
+func (mwu *MWUtil) generateVolSyncManifest(
+	name, namespace string,
+	pvcSelector metav1.LabelSelector, schedulingInterval string,
+	replClassSelector metav1.LabelSelector) (*ocmworkv1.Manifest, error) {
+	return mwu.GenerateManifest(&rmn.VolSyncReplicationGroup{
+		TypeMeta:   metav1.TypeMeta{Kind: "VolumeReplicationGroup", APIVersion: "ramendr.openshift.io/v1alpha1"},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: rmn.VolSyncReplicationGroupSpec{
+			PVCSelector:              pvcSelector,
+			SchedulingInterval:       schedulingInterval,
+			ReplicationState:         rmn.Primary,
 			ReplicationClassSelector: replClassSelector,
 		},
 	})

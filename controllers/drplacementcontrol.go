@@ -226,6 +226,39 @@ func (d *DRPCInstance) isVRGAlreadyDeployedElsewhere(clusterToSkip string) (stri
 	return "", false
 }
 
+func (d *DRPCInstance) createVolSyncManifestWork(targetCluster string) error {
+	// create VSRG ManifestWork
+	d.log.Info("Creating VSRG ManifestWork",
+		"Last State:", d.getLastDRState(), "cluster", targetCluster)
+
+	if err := d.mwu.CreateOrUpdateVolSyncManifestWork(
+		d.instance.Name, d.instance.Namespace,
+		targetCluster, d.drPolicy,
+		d.instance.Spec.PVCSelector); err != nil {
+		d.log.Error(err, "failed to create or update VolumeReplicationGroup manifest")
+
+		return fmt.Errorf("failed to create or update VolumeReplicationGroup manifest in namespace %s (%w)", targetCluster, err)
+	}
+
+	return nil
+}
+
+func (d *DRPCInstance) createManifestWorkForPlugin(targetCluster string) error {
+	// TODO: check if VRG MW here as a less expensive way to validate if Namespace exists
+	err := d.ensureNamespaceExistsOnManagedCluster(targetCluster)
+	if err != nil {
+		return fmt.Errorf("Creating ManifestWork couldn't ensure namespace '%s' on cluster %s exists",
+			d.instance.Namespace, targetCluster)
+	}
+
+	if d.instance.Spec.VolumeReplicationPlugin == rmn.VolSync {
+		return d.createVolSyncManifestWork(targetCluster)
+	}
+
+	// Create VRG first, to leverage user PlacementRule decision to skip placement and move to cleanup
+	return d.createVRGManifestWork(targetCluster)
+}
+
 func (d *DRPCInstance) startDeploying(homeCluster, homeClusterNamespace string) (bool, error) {
 	const done = true
 
@@ -233,8 +266,7 @@ func (d *DRPCInstance) startDeploying(homeCluster, homeClusterNamespace string) 
 	d.setDRState(rmn.Deploying)
 	d.setMetricsTimerFromDRState(rmn.Deploying)
 
-	// Create VRG first, to leverage user PlacementRule decision to skip placement and move to cleanup
-	err := d.createVRGManifestWork(homeCluster)
+	err := d.createManifestWorkForPlugin(homeCluster)
 	if err != nil {
 		return false, err
 	}
@@ -857,13 +889,6 @@ func (d *DRPCInstance) clearUserPlacementRuleStatus() error {
 }
 
 func (d *DRPCInstance) createVRGManifestWork(homeCluster string) error {
-	// TODO: check if VRG MW here as a less expensive way to validate if Namespace exists
-	err := d.ensureNamespaceExistsOnManagedCluster(homeCluster)
-	if err != nil {
-		return fmt.Errorf("createVRGManifestWork couldn't ensure namespace '%s' on cluster %s exists",
-			d.instance.Namespace, homeCluster)
-	}
-
 	// create VRG ManifestWork
 	d.log.Info("Creating VRG ManifestWork",
 		"Last State:", d.getLastDRState(), "cluster", homeCluster)

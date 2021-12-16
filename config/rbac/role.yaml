@@ -119,6 +119,32 @@ rules:
 - apiGroups:
   - ramendr.openshift.io
   resources:
+  - volsyncreplicationgroups
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ramendr.openshift.io
+  resources:
+  - volsyncreplicationgroups/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - ramendr.openshift.io
+  resources:
+  - volsyncreplicationgroups/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - ramendr.openshift.io
+  resources:
   - volumereplicationgroups
   verbs:
   - create

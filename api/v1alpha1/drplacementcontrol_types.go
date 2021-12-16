@@ -36,6 +36,13 @@ const (
 	ActionRelocate = DRAction("Relocate")
 )
 
+type VolumeReplicationPluginType string
+
+const (
+	VolSync = VolumeReplicationPluginType("VolSync")
+	VolRep  = VolumeReplicationPluginType("VolRep")
+)
+
 // DRPlacementControlSpec defines the desired state of DRPlacementControl
 type DRPlacementControlSpec struct {
 	// PlacementRef is the reference to the PlacementRule used by DRPC
@@ -58,6 +65,9 @@ type DRPlacementControlSpec struct {
 
 	// Action is either Failover or Relocate operation
 	Action DRAction `json:"action,omitempty"`
+
+	// Volume Replication plugin
+	VolumeReplicationPlugin VolumeReplicationPluginType `json:"volumeReplicationPlugin,omitempty"`
 }
 
 // DRState for keeping track of the DR placement

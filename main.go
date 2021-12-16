@@ -155,6 +155,13 @@ func main() {
 
 	setupReconcilers(mgr)
 
+	if err = (&controllers.VolSyncReplicationGroupReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "VolSyncReplicationGroup")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 	if err := mgr.AddHealthzCheck("health", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")

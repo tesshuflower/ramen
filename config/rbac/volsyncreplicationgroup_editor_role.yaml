@@ -1,0 +1,24 @@
+# permissions for end users to edit volsyncreplicationgroups.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: volsyncreplicationgroup-editor-role
+rules:
+- apiGroups:
+  - ramendr.openshift.io
+  resources:
+  - volsyncreplicationgroups
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ramendr.openshift.io
+  resources:
+  - volsyncreplicationgroups/status
+  verbs:
+  - get
