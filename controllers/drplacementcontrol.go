@@ -48,7 +48,7 @@ type DRPCInstance struct {
 	mcvRequestInProgress bool
 	userPlacementRule    *plrv1.PlacementRule
 	drpcPlacementRule    *plrv1.PlacementRule
-	vrgs                 map[string]*rmn.VolumeReplicationGroup
+	vrgs                 map[string]interface{}
 	mwu                  rmnutil.MWUtil
 	metricsTimer         timerInstance
 }
@@ -124,6 +124,10 @@ func (d *DRPCInstance) RunInitialDeployment() (bool, error) {
 
 	// Ensure that initial deployment is complete
 	if deployed && d.isUserPlRuleUpdated(homeCluster) {
+		if d.instance.Spec.VolumeReplicationPlugin == rmn.VolSync {
+			return d.ensureVolSyncReplicationSetup(homeCluster)
+		}
+
 		// If for whatever reason, the DRPC status is missing (i.e. DRPC could have been deleted mistakingly and
 		// recreated again), we should update it with whatever status we are at.
 		if d.getLastDRState() == rmn.DRState("") {
@@ -148,6 +152,49 @@ func (d *DRPCInstance) RunInitialDeployment() (bool, error) {
 		d.getConditionStatusForTypeAvailable(), string(d.instance.Status.Phase), "Initial deployment completed")
 
 	return result, nil
+}
+
+func (d *DRPCInstance) ensureVolSyncReplicationSetup(homeCluster string) (bool, error) {
+	_, err := d.ensureReplicationDestination(homeCluster)
+	if err != nil {
+		return false, err
+	}
+
+	return d.ensureRepliationSource(homeCluster)
+}
+
+func (d *DRPCInstance) ensureReplicationDestination(sourceCluster string) (bool, error) {
+	needsRequeue := false
+	sourceVSRG, found := d.getVSRG(sourceCluster)
+	if !found || len(sourceVSRG.Status.ProtectedPVCs) == 0 {
+		return false, fmt.Errorf("waiting for the source cluster to provide the list of protected PVCs")
+	}
+
+	for cn, obj := range d.vrgs {
+		if cn == sourceCluster {
+			continue
+		}
+
+		vsrg, ok := obj.(*rmn.VolSyncReplicationGroup)
+		if !ok {
+			return false, fmt.Errorf("invalid VolSyncReplicationGroup object %v", obj)
+		}
+
+		if len(vsrg.Spec.RDInfo) != len(sourceVSRG.Status.ProtectedPVCs) {
+			createOrUpdateVSRG(cn, sourceVSRG.Status.ProtectedPVCs)
+			needsRequeue = true
+		}
+	}
+
+	if needsRequeue {
+		return false, nil
+	}
+
+	return true, nil
+}
+
+func (d *DRPCInstance) ensureRepliationSource(sourceCluster string) (bool, error) {
+	return true, nil
 }
 
 func (d *DRPCInstance) getHomeCluster() (string, string) {
@@ -204,7 +251,7 @@ func (d *DRPCInstance) isVRGAlreadyDeployedOnTargetCluster(targetCluster string)
 }
 
 func (d *DRPCInstance) getCachedVRG(clusterName string) *rmn.VolumeReplicationGroup {
-	vrg, found := d.vrgs[clusterName]
+	vrg, found := d.getVRG(clusterName)
 	if !found {
 		d.log.Info("VRG not found on cluster", "Name", clusterName)
 
@@ -320,7 +367,7 @@ func (d *DRPCInstance) RunFailover() (bool, error) {
 	// Failover cluster does not have a VRG yet, then start failover
 	// NOTE: If an initial spec started with the failover action, it will be failed over to the
 	// provided failover cluster. This is an inadvertent outcome, but deemed not an issue.
-	failoverClusterVRG, ok := d.vrgs[d.instance.Spec.FailoverCluster]
+	failoverClusterVRG, ok := d.getVRG(d.instance.Spec.FailoverCluster)
 	if !ok {
 		return d.switchToFailoverCluster()
 	}
@@ -573,9 +620,9 @@ func (d *DRPCInstance) isVRGConditionDataReady(homeCluster string) bool {
 
 	d.log.Info("Checking whether VRG DataReay is true", "cluster", homeCluster)
 
-	vrg := d.vrgs[homeCluster]
+	vrg, ok := d.getVRG(homeCluster)
 
-	if vrg == nil {
+	if vrg == nil || !ok {
 		d.log.Info("VRG not available on cluster", "cluster", homeCluster)
 
 		return !ready
@@ -597,9 +644,9 @@ func (d *DRPCInstance) isVRGConditionClusterDataReady(homeCluster string) bool {
 
 	d.log.Info("Checking whether VRG ClusterDataReay is true", "cluster", homeCluster)
 
-	vrg := d.vrgs[homeCluster]
+	vrg, ok := d.getVRG(homeCluster)
 
-	if vrg == nil {
+	if vrg == nil || !ok {
 		d.log.Info("VRG not available on cluster", "cluster", homeCluster)
 
 		return !ready
@@ -932,11 +979,21 @@ func (d *DRPCInstance) ensureNamespaceExistsOnManagedCluster(homeCluster string)
 	return nil
 }
 
-func (d *DRPCInstance) isVRGPrimary(vrg *rmn.VolumeReplicationGroup) bool {
+func (d *DRPCInstance) isVRGPrimary(obj interface{}) bool {
+	vrg, ok := obj.(*rmn.VolumeReplicationGroup)
+	if !ok {
+		return false
+	}
+
 	return (vrg.Spec.ReplicationState == rmn.Primary)
 }
 
-func (d *DRPCInstance) isVRGSecondary(vrg *rmn.VolumeReplicationGroup) bool {
+func (d *DRPCInstance) isVRGSecondary(obj interface{}) bool {
+	vrg, ok := obj.(*rmn.VolumeReplicationGroup)
+	if !ok {
+		return false
+	}
+
 	return (vrg.Spec.ReplicationState == rmn.Secondary)
 }
 
@@ -1584,4 +1641,14 @@ func (d *DRPCInstance) setMetricsTimer(
 func (d *DRPCInstance) setDRPCCondition(conditions *[]metav1.Condition, condType string,
 	observedGeneration int64, status metav1.ConditionStatus, reason, msg string) {
 	d.needStatusUpdate = SetDRPCStatusCondition(conditions, condType, observedGeneration, status, reason, msg)
+}
+
+func (d *DRPCInstance) getVRG(fromCluster string) (*rmn.VolumeReplicationGroup, bool) {
+	vrg, ok := d.vrgs[fromCluster].(*rmn.VolumeReplicationGroup)
+	return vrg, ok
+}
+
+func (d *DRPCInstance) getVSRG(fromCluster string) (*rmn.VolSyncReplicationGroup, bool) {
+	vsrg, ok := d.vrgs[fromCluster].(*rmn.VolSyncReplicationGroup)
+	return vsrg, ok
 }

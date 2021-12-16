@@ -72,6 +72,8 @@ type ProgressCallback func(string, string)
 type ManagedClusterViewGetter interface {
 	GetVRGFromManagedCluster(
 		resourceName, resourceNamespace, managedCluster string) (*rmn.VolumeReplicationGroup, error)
+	GetVSRGFromManagedCluster(
+		resourceName, resourceNamespace, managedCluster string) (*rmn.VolSyncReplicationGroup, error)
 
 	GetNamespaceFromManagedCluster(resourceName, resourceNamespace, managedCluster string) (*corev1.Namespace, error)
 }
@@ -104,6 +106,32 @@ func (m ManagedClusterViewGetterImpl) GetVRGFromManagedCluster(
 	err := m.getManagedClusterResource(mcvMeta, mcvViewscope, vrg, logger)
 
 	return vrg, err
+}
+
+func (m ManagedClusterViewGetterImpl) GetVSRGFromManagedCluster(
+	resourceName, resourceNamespace, managedCluster string) (*rmn.VolSyncReplicationGroup, error) {
+	logger := ctrl.Log.WithName("MCV").WithValues("resouceName", resourceName)
+	// get VRG and verify status through ManagedClusterView
+	mcvMeta := metav1.ObjectMeta{
+		Name:      BuildManagedClusterViewName(resourceName, resourceNamespace, "vsrg"),
+		Namespace: managedCluster,
+		Annotations: map[string]string{
+			rmnutil.DRPCNameAnnotation:      resourceName,
+			rmnutil.DRPCNamespaceAnnotation: resourceNamespace,
+		},
+	}
+
+	mcvViewscope := viewv1beta1.ViewScope{
+		Resource:  "VolSyncReplicationGroup",
+		Name:      resourceName,
+		Namespace: resourceNamespace,
+	}
+
+	vsrg := &rmn.VolSyncReplicationGroup{}
+
+	err := m.getManagedClusterResource(mcvMeta, mcvViewscope, vsrg, logger)
+
+	return vsrg, err
 }
 
 func (m ManagedClusterViewGetterImpl) GetNamespaceFromManagedCluster(
@@ -924,9 +952,8 @@ func (r *DRPlacementControlReconciler) clonePlacementRule(ctx context.Context,
 }
 
 func (r *DRPlacementControlReconciler) getVRGsFromManagedClusters(drpc *rmn.DRPlacementControl,
-	drPolicy *rmn.DRPolicy) (map[string]*rmn.VolumeReplicationGroup, error) {
-	vrgs := map[string]*rmn.VolumeReplicationGroup{}
-
+	drPolicy *rmn.DRPolicy) (map[string]interface{}, error) {
+	resources := make(map[string]interface{})
 	for _, drCluster := range drPolicy.Spec.DRClusterSet {
 		// Only fetch failover cluster VRG if action is Failover
 		if drpc.Spec.Action == rmn.ActionFailover && drpc.Spec.FailoverCluster != drCluster.Name {
@@ -935,7 +962,13 @@ func (r *DRPlacementControlReconciler) getVRGsFromManagedClusters(drpc *rmn.DRPl
 			continue
 		}
 
-		vrg, err := r.MCVGetter.GetVRGFromManagedCluster(drpc.Name, drpc.Namespace, drCluster.Name)
+		var resource interface{}
+		var err error 
+		if drpc.Spec.VolumeReplicationPlugin == rmn.VolSync {
+			resource, err = r.MCVGetter.GetVSRGFromManagedCluster(drpc.Name, drpc.Namespace, drCluster.Name)
+		} else {
+			resource, err = r.MCVGetter.GetVRGFromManagedCluster(drpc.Name, drpc.Namespace, drCluster.Name)
+		}
 		if err != nil {
 			// Only NotFound error is accepted
 			if errors.IsNotFound(err) {
@@ -944,15 +977,15 @@ func (r *DRPlacementControlReconciler) getVRGsFromManagedClusters(drpc *rmn.DRPl
 				continue
 			}
 
-			return vrgs, fmt.Errorf("failed to retrieve VRG from %s. err (%w)", drCluster.Name, err)
+			return resources, fmt.Errorf("failed to retrieve VRG from %s. err (%w)", drCluster.Name, err)
 		}
 
-		vrgs[drCluster.Name] = vrg
+		resources[drCluster.Name] = resource
 	}
 
-	r.Log.Info("VRGs location", "VRGs", vrgs)
+	r.Log.Info("VRGs location", "VRGs", resources)
 
-	return vrgs, nil
+	return resources, nil
 }
 
 func (r *DRPlacementControlReconciler) deleteClonedPlacementRule(ctx context.Context,

@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"reflect"
 
 	"github.com/go-logr/logr"
 
@@ -33,7 +34,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
@@ -41,6 +44,7 @@ import (
 	ramendrv1alpha1 "github.com/ramendr/ramen/api/v1alpha1"
 	rmnutil "github.com/ramendr/ramen/controllers/util"
 	"github.com/ramendr/ramen/controllers/volsync"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 const vsrgFinalizerName = "volumereplicationgroups.ramendr.openshift.io/vsrg-protection"
@@ -56,7 +60,7 @@ type VolSyncReplicationGroupReconciler struct {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *VolSyncReplicationGroupReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	pvcPredicate := pvcPredicateFunc()
+	pvcPredicate := pvcPredicateFuncFoVolSync()
 	pvcMapFun := handler.EnqueueRequestsFromMapFunc(handler.MapFunc(func(obj client.Object) []reconcile.Request {
 		log := ctrl.Log.WithName("pvcmap").WithName("VolSyncReplicationGroup")
 
@@ -86,6 +90,83 @@ func (r *VolSyncReplicationGroupReconciler) SetupWithManager(mgr ctrl.Manager) e
 
 func init() {
 	// Register custom metrics with the global Prometheus registry here
+}
+
+// pvcPredicateFunc sends reconcile requests for create and delete events.
+// For them the filtering of whether the pvc belongs to the any of the
+// VolumeReplicationGroup CRs and identifying such a CR is done in the
+// map function by comparing namespaces and labels.
+// But for update of pvc, the reconcile request should be sent only for
+// specific changes. Do that comparison here.
+func pvcPredicateFuncFoVolSync() predicate.Funcs {
+	pvcPredicate := predicate.Funcs{
+		// NOTE: Create predicate is retained, to help with logging the event
+		CreateFunc: func(e event.CreateEvent) bool {
+			log := ctrl.Log.WithName("pvcmap").WithName("VolumeReplicationGroup")
+
+			log.Info("Create event for PersistentVolumeClaim")
+
+			return true
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			log := ctrl.Log.WithName("pvcmap").WithName("VolumeReplicationGroup")
+			oldPVC, ok := e.ObjectOld.DeepCopyObject().(*corev1.PersistentVolumeClaim)
+			if !ok {
+				log.Info("Failed to deep copy older PersistentVolumeClaim")
+
+				return false
+			}
+			newPVC, ok := e.ObjectNew.DeepCopyObject().(*corev1.PersistentVolumeClaim)
+			if !ok {
+				log.Info("Failed to deep copy newer PersistentVolumeClaim")
+
+				return false
+			}
+
+			log.Info("Update event for PersistentVolumeClaim")
+
+			return updateEventDecisionForVolSync(oldPVC, newPVC, log)
+		},
+		DeleteFunc: func(e event.DeleteEvent) bool {
+			// PVC deletion is held back till VRG deletion. This is to
+			// avoid races between subscription deletion and updating
+			// VRG state. If VRG state is not updated prior to subscription
+			// cleanup, then PVC deletion (triggered by subscription
+			// cleanup) would leaving behind VolRep resource with stale
+			// state (as per the current VRG state).
+			return false
+		},
+	}
+
+	return pvcPredicate
+}
+
+func updateEventDecisionForVolSync(oldPVC *corev1.PersistentVolumeClaim,
+	newPVC *corev1.PersistentVolumeClaim,
+	log logr.Logger) bool {
+	const requeue bool = true
+
+	pvcNamespacedName := types.NamespacedName{Name: newPVC.Name, Namespace: newPVC.Namespace}
+	predicateLog := log.WithValues("pvc", pvcNamespacedName.String())
+	// If finalizers change then deep equal of spec fails to catch it, we may want more
+	// conditions here, compare finalizers and also status.phase to catch bound PVCs
+	if !reflect.DeepEqual(oldPVC.Spec, newPVC.Spec) {
+		predicateLog.Info("Reconciling due to change in spec")
+
+		return requeue
+	}
+
+	if oldPVC.Status.Phase != corev1.ClaimBound && newPVC.Status.Phase == corev1.ClaimBound {
+		predicateLog.Info("Reconciling due to phase change", "oldPhase", oldPVC.Status.Phase,
+			"newPhase", newPVC.Status.Phase)
+
+		return requeue
+	}
+
+	predicateLog.Info("Not Requeuing", "oldPVC Phase", oldPVC.Status.Phase,
+		"newPVC phase", newPVC.Status.Phase)
+
+	return !requeue
 }
 
 //+kubebuilder:rbac:groups=ramendr.openshift.io,resources=volsyncreplicationgroups,verbs=get;list;watch;create;update;patch;delete
@@ -142,8 +223,8 @@ func (r *VolSyncReplicationGroupReconciler) Reconcile(ctx context.Context, req c
 	// Save a copy of the instance status to be used for the VolSync status update comparison
 	v.instance.Status.DeepCopyInto(&v.savedInstanceStatus)
 
-	if v.savedInstanceStatus.ProtectedPVCs == nil {
-		v.savedInstanceStatus.ProtectedPVCs = []ramendrv1alpha1.ProtectedPVC{}
+	if v.savedInstanceStatus.VolSyncPVCs == nil {
+		v.savedInstanceStatus.VolSyncPVCs = []ramendrv1alpha1.VolSyncPVCInfo{}
 	}
 
 	return v.processVolSync()
@@ -174,7 +255,7 @@ func (v *VSRGInstance) processVolSync() (ctrl.Result, error) {
 		msg := "VolSyncReplicationGroup state is invalid"
 		setVRGDataErrorCondition(&v.instance.Status.Conditions, v.instance.Generation, msg)
 
-		if err = v.updateVRGStatus(false); err != nil {
+		if err = v.updateVSRGStatus(); err != nil {
 			v.log.Error(err, "Status update failed")
 			// Since updating status failed, reconcile
 			return ctrl.Result{Requeue: true}, nil
@@ -192,28 +273,24 @@ func (v *VSRGInstance) processVolSync() (ctrl.Result, error) {
 		msg := "Failed to get list of pvcs"
 		setVRGDataErrorCondition(&v.instance.Status.Conditions, v.instance.Generation, msg)
 
-		if err = v.updateVRGStatus(false); err != nil {
+		if err = v.updateVSRGStatus(); err != nil {
 			v.log.Error(err, "VolSync Status update failed")
 		}
 
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	return v.processVRGActions()
+	return v.processVSRGActions()
 }
 
-func (v *VSRGInstance) processVRGActions() (ctrl.Result, error) {
-	v.log = v.log.WithName("VSRGInstance").WithValues("State", v.instance.Spec.ReplicationState)
+func (v *VSRGInstance) initializeStatus() {
+	// create ProtectedPVCs map for status
+	if v.instance.Status.VolSyncPVCs == nil {
+		v.instance.Status.VolSyncPVCs = []ramendrv1alpha1.VolSyncPVCInfo{}
 
-	switch {
-	case !v.instance.GetDeletionTimestamp().IsZero():
-		v.log = v.log.WithValues("Finalize", true)
-
-		return v.processForDeletion()
-	case v.instance.Spec.ReplicationState == ramendrv1alpha1.Primary:
-		return v.processAsPrimary()
-	default: // Secondary, not primary and not deleted
-		return v.processAsSecondary()
+		// Set the VolSync conditions to unknown as nothing is known at this point
+		msg := "Initializing VolSyncReplicationGroup"
+		setVRGInitialCondition(&v.instance.Status.Conditions, v.instance.Generation, msg)
 	}
 }
 
@@ -232,123 +309,19 @@ func (v *VSRGInstance) validateVRGState() error {
 	return nil
 }
 
-func (v *VSRGInstance) restorePVCs() error {
-	// TODO: refactor this per this comment: https://github.com/RamenDR/ramen/pull/197#discussion_r687246692
-	clusterDataReady := findCondition(v.instance.Status.Conditions, VRGConditionTypeClusterDataReady)
-	if clusterDataReady != nil && clusterDataReady.Status == metav1.ConditionTrue &&
-		clusterDataReady.ObservedGeneration == v.instance.Generation {
-		v.log.Info("VolSyncReplicationGroup's ClusterDataReady condition found. PV restore must have already been applied")
+func (v *VSRGInstance) processVSRGActions() (ctrl.Result, error) {
+	v.log = v.log.WithName("VSRGInstance").WithValues("State", v.instance.Spec.ReplicationState)
 
-		return nil
+	switch {
+	case !v.instance.GetDeletionTimestamp().IsZero():
+		v.log = v.log.WithValues("Finalize", true)
+
+		return v.processForDeletion()
+	case v.instance.Spec.ReplicationState == ramendrv1alpha1.Primary:
+		return v.processAsPrimary()
+	default: // Secondary, not primary and not deleted
+		return v.processAsSecondary()
 	}
-
-	// if len(v.instance.Spec.S3Profiles) == 0 {
-	// return fmt.Errorf("no S3Profiles configured")
-	// }
-
-	msg := "Restoring PV cluster data"
-	setVRGClusterDataProgressingCondition(&v.instance.Status.Conditions, v.instance.Generation, msg)
-
-	v.log.Info("Restoring PVCs to this managed cluster.", "RDSpec", v.instance.Spec.RDSpec)
-
-	success := false
-
-	for _, rdInfo := range v.instance.Spec.RDSpec {
-
-		setVRGClusterDataReadyCondition(&v.instance.Status.Conditions, v.instance.Generation, msg)
-
-		v.log.Info("Restored PVC", "rdInfo", rdInfo)
-
-		success = true
-
-		break
-	}
-
-	if !success {
-		return fmt.Errorf("failed to restorePVCs using RDSpec (%v)", v.instance.Spec.RDSpec)
-	}
-
-	return nil
-}
-
-// sanityCheckPVClusterData returns an error if there are PVs in the input
-// pvList that have conflicting claimRefs that point to the same PVC name but
-// different PVC UID.
-//
-// Under normal circumstances, each PV in the S3 store will point to a unique
-// PVC and the sanity check will succeed.  In the case of failover related
-// split-brain error scenarios, there can be multiple clusters that concurrently
-// have the same VolSync in primary state.  During the split-brain scenario, if the
-// VolSync is configured to use the same S3 store for both download and upload of
-// cluster data and, if the application added a new PVC to the application on
-// each cluster after failover, the S3 store could end up with multiple PVs for
-// the same PVC because each of the clusters uploaded its unique PV to the S3
-// store, thus resulting in ambiguous PVs for the same PVC.  If the S3 store
-// ends up in such a situation, Ramen cannot determine with certainty which PV
-// among the conflicting PVs should be restored to the cluster, and thus fails
-// the sanity check.
-func (v *VSRGInstance) sanityCheckPVClusterData(pvList []corev1.PersistentVolume) error {
-	pvMap := map[string]corev1.PersistentVolume{}
-	// Scan the PVs and create a map of PVs that have conflicting claimRefs
-	for _, thisPV := range pvList {
-		claimRef := thisPV.Spec.ClaimRef
-		claimKey := fmt.Sprintf("%s/%s", claimRef.Namespace, claimRef.Name)
-
-		prevPV, found := pvMap[claimKey]
-		if !found {
-			pvMap[claimKey] = thisPV
-
-			continue
-		}
-
-		msg := fmt.Sprintf("when restoring PV cluster data, detected conflicting claimKey %s in PVs %s and %s",
-			claimKey, prevPV.Name, thisPV.Name)
-		v.log.Info(msg)
-
-		return fmt.Errorf(msg)
-	}
-
-	return nil
-}
-
-func (v *VSRGInstance) restorePVClusterData(pvList []corev1.PersistentVolume) error {
-	numRestored := 0
-
-	for idx := range pvList {
-		pv := &pvList[idx]
-		v.cleanupPVForRestore(pv)
-		v.addPVRestoreAnnotation(pv)
-
-		if err := v.reconciler.Create(v.ctx, pv); err != nil {
-			if errors.IsAlreadyExists(err) {
-				err := v.validatePVExistence(pv)
-				if err != nil {
-					v.log.Info("PV exists. Ignoring and moving to next PV", "error", err.Error())
-					// ignoring any errors
-					continue
-				}
-
-				// Valid PV exists and it is managed by Ramen
-				numRestored++
-
-				continue
-			}
-
-			v.log.Info("Failed to restore PV", "name", pv.Name, "Error", err)
-
-			continue
-		}
-
-		numRestored++
-	}
-
-	if numRestored != len(pvList) {
-		return fmt.Errorf("failed to restore all PVs. Total %d. Restored %d", len(pvList), numRestored)
-	}
-
-	v.log.Info("Success restoring PVs", "Total", numRestored)
-
-	return nil
 }
 
 func (v *VSRGInstance) validatePVExistence(pv *corev1.PersistentVolume) error {
@@ -371,17 +344,6 @@ func (v *VSRGInstance) validatePVExistence(pv *corev1.PersistentVolume) error {
 	return nil
 }
 
-// cleanupPVForRestore cleans up required PV fields, to ensure restore succeeds to a new cluster, and
-// rebinding the PV to a newly created PVC with the same claimRef succeeds
-func (v *VSRGInstance) cleanupPVForRestore(pv *corev1.PersistentVolume) {
-	pv.ResourceVersion = ""
-	if pv.Spec.ClaimRef != nil {
-		pv.Spec.ClaimRef.UID = ""
-		pv.Spec.ClaimRef.ResourceVersion = ""
-		pv.Spec.ClaimRef.APIVersion = ""
-	}
-}
-
 // addPVRestoreAnnotation adds annotation to the PV indicating that the PV is restored by Ramen
 func (v *VSRGInstance) addPVRestoreAnnotation(pv *corev1.PersistentVolume) {
 	if pv.ObjectMeta.Annotations == nil {
@@ -389,17 +351,6 @@ func (v *VSRGInstance) addPVRestoreAnnotation(pv *corev1.PersistentVolume) {
 	}
 
 	pv.ObjectMeta.Annotations[PVRestoreAnnotation] = "True"
-}
-
-func (v *VSRGInstance) initializeStatus() {
-	// create ProtectedPVCs map for status
-	if v.instance.Status.ProtectedPVCs == nil {
-		v.instance.Status.ProtectedPVCs = []ramendrv1alpha1.ProtectedPVC{}
-
-		// Set the VolSync conditions to unknown as nothing is known at this point
-		msg := "Initializing VolSyncReplicationGroup"
-		setVRGInitialCondition(&v.instance.Status.Conditions, v.instance.Generation, msg)
-	}
 }
 
 // updatePVCList fetches and updates the PVC list to process for the current instance of VolSync
@@ -450,14 +401,14 @@ func (v *VSRGInstance) processForDeletion() (ctrl.Result, error) {
 
 	defer v.log.Info("Exiting processing VolSyncReplicationGroup")
 
-	if !containsString(v.instance.ObjectMeta.Finalizers, vrgFinalizerName) {
-		v.log.Info("Finalizer missing from resource", "finalizer", vrgFinalizerName)
+	if !containsString(v.instance.ObjectMeta.Finalizers, vsrgFinalizerName) {
+		v.log.Info("Finalizer missing from resource", "finalizer", vsrgFinalizerName)
 
 		return ctrl.Result{}, nil
 	}
 
-	if err := v.removeFinalizer(vrgFinalizerName); err != nil {
-		v.log.Info("Failed to remove finalizer", "finalizer", vrgFinalizerName, "errorValue", err)
+	if err := v.removeFinalizer(vsrgFinalizerName); err != nil {
+		v.log.Info("Failed to remove finalizer", "finalizer", vsrgFinalizerName, "errorValue", err)
 
 		return ctrl.Result{Requeue: true}, nil
 	}
@@ -476,32 +427,19 @@ func (v *VSRGInstance) reconcileVRsForDeletion() bool {
 	return true
 }
 
-// removeFinalizer removes VolSync finalizer form the resource
-func (v *VSRGInstance) removeFinalizer(finalizer string) error {
-	v.instance.ObjectMeta.Finalizers = removeString(v.instance.ObjectMeta.Finalizers, finalizer)
-	if err := v.reconciler.Update(v.ctx, v.instance); err != nil {
-		v.log.Error(err, "Failed to remove finalizer", "finalizer", finalizer)
-
-		return fmt.Errorf("failed to remove finalizer from VolSyncReplicationGroup resource (%s/%s), %w",
-			v.instance.Namespace, v.instance.Name, err)
-	}
-
-	return nil
-}
-
 // processAsPrimary reconciles the current instance of VolSync as primary
 func (v *VSRGInstance) processAsPrimary() (ctrl.Result, error) {
 	v.log.Info("Entering processing VolSyncReplicationGroup")
 
 	defer v.log.Info("Exiting processing VolSyncReplicationGroup")
 
-	if err := v.addFinalizer(vrgFinalizerName); err != nil {
+	if err := v.addFinalizer(vsrgFinalizerName); err != nil {
 		v.log.Info("Failed to add finalizer", "finalizer", vsrgFinalizerName, "errorValue", err)
 
 		msg := "Failed to add finalizer to VolSyncReplicationGroup"
 		setVRGDataErrorCondition(&v.instance.Status.Conditions, v.instance.Generation, msg)
 
-		if err = v.updateVRGStatus(false); err != nil {
+		if err = v.updateVSRGStatus(); err != nil {
 			v.log.Error(err, "VolSync Status update failed")
 		}
 
@@ -514,7 +452,7 @@ func (v *VSRGInstance) processAsPrimary() (ctrl.Result, error) {
 		msg := fmt.Sprintf("Failed to restore PVCs (%v)", err.Error())
 		setVRGClusterDataErrorCondition(&v.instance.Status.Conditions, v.instance.Generation, msg)
 
-		if err = v.updateVRGStatus(false); err != nil {
+		if err = v.updateVSRGStatus(); err != nil {
 			v.log.Error(err, "VolSync Status update failed")
 		}
 
@@ -533,7 +471,7 @@ func (v *VSRGInstance) processAsPrimary() (ctrl.Result, error) {
 			rmnutil.EventReasonPrimarySuccess, "Primary Success")
 	}
 
-	if err := v.updateVRGStatus(true); err != nil {
+	if err := v.updateVSRGStatus(); err != nil {
 		requeue = true
 	}
 
@@ -546,12 +484,102 @@ func (v *VSRGInstance) processAsPrimary() (ctrl.Result, error) {
 	return ctrl.Result{}, nil
 }
 
+func (v *VSRGInstance) restorePVCs() error {
+	// TODO: refactor this per this comment: https://github.com/RamenDR/ramen/pull/197#discussion_r687246692
+	clusterDataReady := findCondition(v.instance.Status.Conditions, VRGConditionTypeClusterDataReady)
+	if clusterDataReady != nil && clusterDataReady.Status == metav1.ConditionTrue &&
+		clusterDataReady.ObservedGeneration == v.instance.Generation {
+		v.log.Info("VolSyncReplicationGroup's ClusterDataReady condition found. PV restore must have already been applied")
+
+		return nil
+	}
+
+	// if len(v.instance.Spec.S3Profiles) == 0 {
+	// return fmt.Errorf("no S3Profiles configured")
+	// }
+
+	msg := "Restoring PV cluster data"
+	setVRGClusterDataProgressingCondition(&v.instance.Status.Conditions, v.instance.Generation, msg)
+
+	v.log.Info("Restoring PVCs to this managed cluster.", "RDInfo", v.instance.Spec.RDInfo)
+
+	success := false
+
+	for _, rdInfo := range v.instance.Spec.RDInfo {
+
+		setVRGClusterDataReadyCondition(&v.instance.Status.Conditions, v.instance.Generation, msg)
+
+		v.log.Info("Restored PVC", "rdInfo", rdInfo)
+
+		success = true
+
+		break
+	}
+
+	if !success {
+		return fmt.Errorf("failed to restorePVCs using RDInfos (%v)", v.instance.Spec.RDInfo)
+	}
+
+	return nil
+}
+
 func (v *VSRGInstance) reconcileVolSyncAsPrimary() bool {
-	// 3. Reconcile RSInfo (deletion or Replication)
+	if len(v.instance.Spec.RSInfo) != 0 {
+		ok := v.setupReplicationSource()
+		if !ok {
+			return false
+		}
+	}
+
+	if len(v.pvcList.Items) != len(v.instance.Status.VolSyncPVCs) {
+		v.updateInstanceStatus()
+	}
 
 	v.log.Info("Successfully reconciled VolSync as Primary")
 
 	return true
+}
+
+func (v *VSRGInstance) setupReplicationSource() bool {
+	return true
+}
+
+func (v *VSRGInstance) updateInstanceStatus() {
+	updateNeeded := false
+	for idx := range v.pvcList.Items {
+		pvc := &v.pvcList.Items[idx]
+
+		if pvc.Status.Phase == corev1.ClaimBound {
+			volSyncPVC := v.findProtectedPVC(pvc.Name)
+			if volSyncPVC == nil {
+				volSyncPVC := &ramendrv1alpha1.VolSyncPVCInfo{Name: pvc.Name,
+					Capacity: pvc.Status.Capacity.Storage(), StorageClassName: pvc.Spec.StorageClassName}
+				v.instance.Status.VolSyncPVCs = append(v.instance.Status.VolSyncPVCs, *volSyncPVC)
+				updateNeeded = true
+			}
+		}
+	}
+
+	if len(v.pvcList.Items) == len(v.instance.Status.VolSyncPVCs) {
+		msg := "PVCs in the VolSyncReplicationGroup are ready for use"
+		setVRGAsPrimaryReadyCondition(&v.instance.Status.Conditions, v.instance.Generation, msg)
+	}
+
+	if updateNeeded {
+		v.updateVSRGStatus()
+	}
+}
+
+// findProtectedPVC returns the &VRG.Status.ProtectedPVC[x] for the given pvcName
+func (v *VSRGInstance) findProtectedPVC(pvcName string) *ramendrv1alpha1.VolSyncPVCInfo {
+	for index := range v.instance.Status.VolSyncPVCs {
+		protectedPVC := &v.instance.Status.VolSyncPVCs[index]
+		if protectedPVC.Name == pvcName {
+			return protectedPVC
+		}
+	}
+
+	return nil
 }
 
 // processAsSecondary reconciles the current instance of VolSync as secondary
@@ -560,13 +588,13 @@ func (v *VSRGInstance) processAsSecondary() (ctrl.Result, error) {
 
 	defer v.log.Info("Exiting processing VolSyncReplicationGroup")
 
-	if err := v.addFinalizer(vrgFinalizerName); err != nil {
-		v.log.Info("Failed to add finalizer", "finalizer", vrgFinalizerName, "errorValue", err)
+	if err := v.addFinalizer(vsrgFinalizerName); err != nil {
+		v.log.Info("Failed to add finalizer", "finalizer", vsrgFinalizerName, "errorValue", err)
 
 		msg := "Failed to add finalizer to VolSyncReplicationGroup"
 		setVRGDataErrorCondition(&v.instance.Status.Conditions, v.instance.Generation, msg)
 
-		if err = v.updateVRGStatus(false); err != nil {
+		if err = v.updateVSRGStatus(); err != nil {
 			v.log.Error(err, "VolSync Status update failed")
 		}
 
@@ -588,7 +616,7 @@ func (v *VSRGInstance) processAsSecondary() (ctrl.Result, error) {
 			rmnutil.EventReasonSecondarySuccess, "Secondary Success")
 	}
 
-	if err := v.updateVRGStatus(true); err != nil {
+	if err := v.updateVSRGStatus(); err != nil {
 		requeue = true
 	}
 
@@ -617,25 +645,6 @@ func (v *VSRGInstance) reconcileVolSyncAsSecondary() error {
 	//TODO: cleanup any RD that is not in rdInfoSpec
 
 	v.log.Info("Successfully reconciled VolSync as Secondary")
-
-	return nil
-}
-
-func (v *VSRGInstance) updateVRGStatus(updateConditions bool) error {
-	//TODO:
-	return nil
-}
-
-func (v *VSRGInstance) addFinalizer(finalizer string) error {
-	if !containsString(v.instance.ObjectMeta.Finalizers, finalizer) {
-		v.instance.ObjectMeta.Finalizers = append(v.instance.ObjectMeta.Finalizers, finalizer)
-		if err := v.reconciler.Update(v.ctx, v.instance); err != nil {
-			v.log.Error(err, "Failed to add finalizer", "finalizer", finalizer)
-
-			return fmt.Errorf("failed to add finalizer to VolSyncReplicationGroup resource (%s/%s), %w",
-				v.instance.Namespace, v.instance.Name, err)
-		}
-	}
 
 	return nil
 }
@@ -678,4 +687,56 @@ func (v *VSRGInstance) updateStatusWithRSInfo(rsInfoForStatus *ramendrv1alpha1.R
 		// Append the new RSInfo to the status
 		v.instance.Status.RSInfo = append(v.instance.Status.RSInfo, *rsInfoForStatus)
 	}
+}
+
+func (v *VSRGInstance) addFinalizer(finalizer string) error {
+	if !controllerutil.ContainsFinalizer(v.instance, finalizer) {
+		controllerutil.AddFinalizer(v.instance, finalizer)
+
+		if err := v.reconciler.Update(v.ctx, v.instance); err != nil {
+			v.log.Error(err, "Failed to add finalizer", "finalizer", finalizer)
+
+			return fmt.Errorf("%w", err)
+		}
+	}
+
+	return nil
+}
+
+// removeFinalizer removes VolSync finalizer form the resource
+func (v *VSRGInstance) removeFinalizer(finalizer string) error {
+	v.instance.ObjectMeta.Finalizers = removeString(v.instance.ObjectMeta.Finalizers, finalizer)
+	if err := v.reconciler.Update(v.ctx, v.instance); err != nil {
+		v.log.Error(err, "Failed to remove finalizer", "finalizer", finalizer)
+
+		return fmt.Errorf("failed to remove finalizer from VolSyncReplicationGroup resource (%s/%s), %w",
+			v.instance.Namespace, v.instance.Name, err)
+	}
+
+	return nil
+}
+
+func (v *VSRGInstance) updateVSRGStatus() error {
+	v.log.Info("Updating VSRG status")
+
+	v.instance.Status.State = getStatusStateFromSpecState(v.instance.Spec.ReplicationState)
+	v.instance.Status.ObservedGeneration = v.instance.Generation
+
+	if !reflect.DeepEqual(v.savedInstanceStatus, v.instance.Status) {
+		v.instance.Status.LastUpdateTime = metav1.Now()
+		if err := v.reconciler.Status().Update(v.ctx, v.instance); err != nil {
+			v.log.Info(fmt.Sprintf("Failed to update VSRG status (%s/%s/%v)",
+				v.instance.Name, v.instance.Namespace, err))
+
+			return fmt.Errorf("failed to update VSRG status (%s/%s)", v.instance.Name, v.instance.Namespace)
+		}
+
+		v.log.Info(fmt.Sprintf("Updated VSRG Status %+v", v.instance.Status))
+
+		return nil
+	}
+
+	v.log.Info(fmt.Sprintf("Nothing to update %+v", v.instance.Status))
+
+	return nil
 }

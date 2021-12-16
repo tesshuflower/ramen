@@ -78,8 +78,19 @@ type VolSyncReplicationGroupSpec struct {
 	// this value is propagated to children VolumeReplication CRs
 	ReplicationState ReplicationState `json:"replicationState"`
 
-	RDSpec []ReplicationDestinationSpec `json:"rdSpec,omitempty"`
-	RSSpec []ReplicationSourceSpec      `json:"rsSpec,omitempty"`
+	RDInfo []ReplicationDestinationSpec `json:"rdInfo,omitempty"`
+	RSInfo []ReplicationSourceSpec      `json:"rsInfo,omitempty"`
+}
+
+type VolSyncPVCInfo struct {
+	// Name of the PVC resource
+	Name string `json:"name"`
+
+	// Represents the actual resources of the underlying volume.
+	Capacity *resource.Quantity `json:"capacity,omitempty"`
+
+	// Name of the StorageClass required by the claim.
+	StorageClassName *string `json:"storageClassName,omitempty"`
 }
 
 // VolSyncReplicationGroupStatus defines the observed state of VolSyncReplicationGroup
@@ -87,7 +98,7 @@ type VolSyncReplicationGroupStatus struct {
 	State State `json:"state,omitempty"`
 
 	// All the protected pvcs
-	ProtectedPVCs []ProtectedPVC `json:"protectedPVCs,omitempty"`
+	VolSyncPVCs []VolSyncPVCInfo `json:"volSyncPVCs,omitempty"`
 
 	// Info about created RDs (should only be filled out by VSGR with ReplicateionState: secondary)
 	RDInfo []ReplicationDestinationInfo `json:"rdInfo,omitempty"`

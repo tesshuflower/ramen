@@ -83,6 +83,15 @@ spec:
                       are ANDed.
                     type: object
                 type: object
+              rdInfo:
+                items:
+                  properties:
+                    pvcName:
+                      type: string
+                  required:
+                  - pvcName
+                  type: object
+                type: array
               replicationClassSelector:
                 description: Label selector to identify the VolumeReplicationClass
                   resources that are scanned to select an appropriate VolumeReplicationClass
@@ -134,6 +143,21 @@ spec:
                   this replication group; this value is propagated to children VolumeReplication
                   CRs
                 type: string
+              rsInfo:
+                items:
+                  properties:
+                    address:
+                      type: string
+                    pvcName:
+                      type: string
+                    sshKeys:
+                      type: string
+                  required:
+                  - address
+                  - pvcName
+                  - sshKeys
+                  type: object
+                type: array
               schedulingInterval:
                 description: scheduling Interval for replicating Persistent Volume
                   data to a peer cluster. Interval is typically in the form <num><m,h,d>.

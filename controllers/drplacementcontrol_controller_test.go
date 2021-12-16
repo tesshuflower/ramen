@@ -200,6 +200,11 @@ func (f FakeMCVGetter) GetVRGFromManagedCluster(
 	return nil, fmt.Errorf("unknonw caller %s", getFunctionNameAtIndex(2))
 }
 
+func (f FakeMCVGetter) GetVSRGFromManagedCluster(
+	resourceName, resourceNamespace, managedCluster string) (*rmn.VolSyncReplicationGroup, error) {
+	return nil, nil
+}
+
 func getVRGFromManifestWork(managedCluster string) (*rmn.VolumeReplicationGroup, error) {
 	manifestLookupKey := types.NamespacedName{
 		Name:      rmnutil.ManifestWorkName(DRPCName, DRPCNamespaceName, "vrg"),
