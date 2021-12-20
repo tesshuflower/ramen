@@ -17,20 +17,41 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
+type ReplicationDestinationSpec struct {
+	PVCName string `json:"pvcName"`
+	SSHKeys string `json:"sshKeys,omitempty"`
+	// capacity is the size of the destination volume to create.
+	Capacity *resource.Quantity `json:"capacity"`
+	// storageClassName can be used to specify the StorageClass of the
+	// destination volume. If not set, the default StorageClass will be used.
+	//+optional
+	StorageClassName *string `json:"storageClassName,omitempty"`
+}
+
 type ReplicationDestinationInfo struct {
 	PVCName string `json:"pvcName"`
+	Address string `json:"address"`
+	SSHKeys string `json:"sshKeys,omitempty"`
+}
+
+type ReplicationSourceSpec struct {
+	PVCName string `json:"pvcName"`
+	Address string `json:"address"`
+	SSHKeys string `json:"sshKeys,omitempty"`
+	//Capacity         *resource.Quantity `json:"capacity"`
+	//StorageClassName *string            `json:"storageClassName,omitempty"`
 }
 
 type ReplicationSourceInfo struct {
 	PVCName string `json:"pvcName"`
-	Address string `json:"address"`
-	SSHKeys string `json:"sshKeys"`
+	SSHKeys string `json:"sshKeys,omitempty"`
 }
 
 // VolSyncReplicationGroupSpec defines the desired state of VolSyncReplicationGroup
@@ -57,8 +78,8 @@ type VolSyncReplicationGroupSpec struct {
 	// this value is propagated to children VolumeReplication CRs
 	ReplicationState ReplicationState `json:"replicationState"`
 
-	RDInfo []ReplicationDestinationInfo `json:"rdInfo,omitempty"`
-	RSInfo []ReplicationSourceInfo `json:"rsInfo,omitempty"`
+	RDSpec []ReplicationDestinationSpec `json:"rdSpec,omitempty"`
+	RSSpec []ReplicationSourceSpec      `json:"rsSpec,omitempty"`
 }
 
 // VolSyncReplicationGroupStatus defines the observed state of VolSyncReplicationGroup
@@ -67,6 +88,11 @@ type VolSyncReplicationGroupStatus struct {
 
 	// All the protected pvcs
 	ProtectedPVCs []ProtectedPVC `json:"protectedPVCs,omitempty"`
+
+	// Info about created RDs (should only be filled out by VSGR with ReplicateionState: secondary)
+	RDInfo []ReplicationDestinationInfo `json:"rdInfo,omitempty"`
+	// Info about created RSs (should only be filled out by VSGR with ReplicateionState: primary)
+	RSInfo []ReplicationSourceInfo `json:"rsInfo,omitempty"`
 
 	// Conditions are the list of VRG's summary conditions and their status.
 	Conditions []metav1.Condition `json:"conditions,omitempty"`

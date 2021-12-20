@@ -19,14 +19,11 @@ package controllers
 import (
 	"context"
 	"fmt"
-	"reflect"
 
 	"github.com/go-logr/logr"
 
 	volrep "github.com/csi-addons/volume-replication-operator/api/v1alpha1"
-	volrepController "github.com/csi-addons/volume-replication-operator/controllers"
 	corev1 "k8s.io/api/core/v1"
-	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -40,8 +37,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
+	volsyncv1alpha1 "github.com/backube/volsync/api/v1alpha1"
 	ramendrv1alpha1 "github.com/ramendr/ramen/api/v1alpha1"
 	rmnutil "github.com/ramendr/ramen/controllers/util"
+	"github.com/ramendr/ramen/controllers/volsync"
 )
 
 const vsrgFinalizerName = "volumereplicationgroups.ramendr.openshift.io/vsrg-protection"
@@ -80,6 +79,8 @@ func (r *VolSyncReplicationGroupReconciler) SetupWithManager(mgr ctrl.Manager) e
 		WithOptions(ctrlcontroller.Options{MaxConcurrentReconciles: getMaxConcurrentReconciles()}).
 		For(&ramendrv1alpha1.VolSyncReplicationGroup{}).
 		Watches(&source.Kind{Type: &corev1.PersistentVolumeClaim{}}, pvcMapFun, builder.WithPredicates(pvcPredicate)).
+		Owns(&volsyncv1alpha1.ReplicationDestination{}).
+		Owns(&volsyncv1alpha1.ReplicationSource{}).
 		Complete(r)
 }
 
@@ -136,6 +137,8 @@ func (r *VolSyncReplicationGroupReconciler) Reconcile(ctx context.Context, req c
 			req.NamespacedName, err)
 	}
 
+	v.volsyncReconciler = volsync.NewVolSyncReconciler(ctx, r.Client, log, v.instance)
+
 	// Save a copy of the instance status to be used for the VolSync status update comparison
 	v.instance.Status.DeepCopyInto(&v.savedInstanceStatus)
 
@@ -154,8 +157,9 @@ type VSRGInstance struct {
 	savedInstanceStatus ramendrv1alpha1.VolSyncReplicationGroupStatus
 	pvcList             *corev1.PersistentVolumeClaimList
 	replClassList       *volrep.VolumeReplicationClassList
-	vrcUpdated          bool
-	namespacedName      string
+	//vrcUpdated          bool
+	namespacedName    string
+	volsyncReconciler *volsync.VolSyncReconciler
 }
 
 func (v *VSRGInstance) processVolSync() (ctrl.Result, error) {
@@ -245,11 +249,11 @@ func (v *VSRGInstance) restorePVCs() error {
 	msg := "Restoring PV cluster data"
 	setVRGClusterDataProgressingCondition(&v.instance.Status.Conditions, v.instance.Generation, msg)
 
-	v.log.Info("Restoring PVCs to this managed cluster.", "RDInfo", v.instance.Spec.RDInfo)
+	v.log.Info("Restoring PVCs to this managed cluster.", "RDSpec", v.instance.Spec.RDSpec)
 
 	success := false
 
-	for _, rdInfo := range v.instance.Spec.RDInfo {
+	for _, rdInfo := range v.instance.Spec.RDSpec {
 
 		setVRGClusterDataReadyCondition(&v.instance.Status.Conditions, v.instance.Generation, msg)
 
@@ -261,7 +265,7 @@ func (v *VSRGInstance) restorePVCs() error {
 	}
 
 	if !success {
-		return fmt.Errorf("failed to restorePVCs using RDInfos (%v)", v.instance.Spec.RDInfo)
+		return fmt.Errorf("failed to restorePVCs using RDSpec (%v)", v.instance.Spec.RDSpec)
 	}
 
 	return nil
@@ -468,7 +472,7 @@ func (v *VSRGInstance) processForDeletion() (ctrl.Result, error) {
 // TODO: Currently removes VR requests unconditionally, needs to ensure it is managed by VolSync
 func (v *VSRGInstance) reconcileVRsForDeletion() bool {
 	v.log.Info("Successfully reconciled VolSync as Primary")
-	
+
 	return true
 }
 
@@ -546,7 +550,7 @@ func (v *VSRGInstance) reconcileVolSyncAsPrimary() bool {
 	// 3. Reconcile RSInfo (deletion or Replication)
 
 	v.log.Info("Successfully reconciled VolSync as Primary")
-	
+
 	return true
 }
 
@@ -569,8 +573,12 @@ func (v *VSRGInstance) processAsSecondary() (ctrl.Result, error) {
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	requeue := v.reconcileVolSyncAsSecondary()
+	if err := v.reconcileVolSyncAsSecondary(); err != nil {
+		v.log.Error(err, "Failed to reconcile VolSyncAsSecondary")
+		return ctrl.Result{}, err
+	}
 
+	requeue := false //FIXME: requeue stuff
 	// If requeue is false, then VolSync was successfully processed as Secondary.
 	// Hence the event to be generated is Success of type normal.
 	// Expectation is that, if something failed and requeue is true, then
@@ -594,8 +602,80 @@ func (v *VSRGInstance) processAsSecondary() (ctrl.Result, error) {
 }
 
 // reconcileVRsAsSecondary reconciles VolumeReplication resources for the VolSync as secondary
-func (v *VSRGInstance) reconcileVolSyncAsSecondary() bool {
+func (v *VSRGInstance) reconcileVolSyncAsSecondary() error {
+	// Reconcile RSInfo (deletion or replication)
+	for _, rdSpec := range v.instance.Spec.RDSpec {
+		rdInfoForStatus, err := v.volsyncReconciler.ReconcileRD(rdSpec)
+		if err != nil {
+			return err
+		}
+		if rdInfoForStatus != nil {
+			// Update the VSRG status with this rdInfo
+			v.updateStatusWithRDInfo(rdInfoForStatus)
+		}
+	}
+	//TODO: cleanup any RD that is not in rdInfoSpec
+
 	v.log.Info("Successfully reconciled VolSync as Secondary")
-	
-	return true
+
+	return nil
+}
+
+func (v *VSRGInstance) updateVRGStatus(updateConditions bool) error {
+	//TODO:
+	return nil
+}
+
+func (v *VSRGInstance) addFinalizer(finalizer string) error {
+	if !containsString(v.instance.ObjectMeta.Finalizers, finalizer) {
+		v.instance.ObjectMeta.Finalizers = append(v.instance.ObjectMeta.Finalizers, finalizer)
+		if err := v.reconciler.Update(v.ctx, v.instance); err != nil {
+			v.log.Error(err, "Failed to add finalizer", "finalizer", finalizer)
+
+			return fmt.Errorf("failed to add finalizer to VolSyncReplicationGroup resource (%s/%s), %w",
+				v.instance.Namespace, v.instance.Name, err)
+		}
+	}
+
+	return nil
+}
+
+func (v *VSRGInstance) updateStatusWithRDInfo(rdInfoForStatus *ramendrv1alpha1.ReplicationDestinationInfo) {
+	if v.instance.Status.RDInfo == nil {
+		v.instance.Status.RDInfo = []ramendrv1alpha1.ReplicationDestinationInfo{}
+	}
+
+	found := false
+	for i := range v.instance.Status.RDInfo {
+		if v.instance.Status.RDInfo[i].PVCName == rdInfoForStatus.PVCName {
+			// blindly replace with our updated RDInfo status
+			v.instance.Status.RDInfo[i] = *rdInfoForStatus
+			found = true
+			break
+		}
+	}
+	if !found {
+		// Append the new RDInfo to the status
+		v.instance.Status.RDInfo = append(v.instance.Status.RDInfo, *rdInfoForStatus)
+	}
+}
+
+func (v *VSRGInstance) updateStatusWithRSInfo(rsInfoForStatus *ramendrv1alpha1.ReplicationSourceInfo) {
+	if v.instance.Status.RSInfo == nil {
+		v.instance.Status.RSInfo = []ramendrv1alpha1.ReplicationSourceInfo{}
+	}
+
+	found := false
+	for i := range v.instance.Status.RSInfo {
+		if v.instance.Status.RSInfo[i].PVCName == rsInfoForStatus.PVCName {
+			// blindly replace with our updated RSInfo status
+			v.instance.Status.RSInfo[i] = *rsInfoForStatus
+			found = true
+			break
+		}
+	}
+	if !found {
+		// Append the new RSInfo to the status
+		v.instance.Status.RSInfo = append(v.instance.Status.RSInfo, *rsInfoForStatus)
+	}
 }
