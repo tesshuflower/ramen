@@ -46,7 +46,7 @@ func NewVolSyncReconciler(ctx context.Context, client client.Client, log logr.Lo
 }
 
 func (r *VolSyncReconciler) ReconcileRD(rdSpec ramendrv1alpha1.ReplicationDestinationSpec) (*ramendrv1alpha1.ReplicationDestinationInfo, error) {
-	l := r.log.WithValues("rdInfoSpec", rdSpec)
+	l := r.log.WithValues("rdSpec", rdSpec)
 
 	rd := &volsyncv1alpha1.ReplicationDestination{
 		ObjectMeta: metav1.ObjectMeta{
@@ -94,14 +94,56 @@ func (r *VolSyncReconciler) ReconcileRD(rdSpec ramendrv1alpha1.ReplicationDestin
 	//
 	// Now check status - only return an RDInfo if we have an address filled out in the ReplicationDestination Status
 	//
-	if rd.Status.Rsync.Address != nil {
-		l.V(1).Info("ReplicationDestination Reconcile Complete")
-		return &ramendrv1alpha1.ReplicationDestinationInfo{
-			PVCName: rdSpec.PVCName,
-			Address: *rd.Status.Rsync.Address,
-		}, nil
+	if rd.Status == nil || rd.Status.Rsync == nil || rd.Status.Rsync.Address == nil {
+		l.V(1).Info("ReplicationDestination waiting for Address ...")
+		return nil, nil
 	}
 
-	l.V(1).Info("ReplicationDestination waiting for Address ...")
-	return nil, nil
+	l.V(1).Info("ReplicationDestination Reconcile Complete")
+	return &ramendrv1alpha1.ReplicationDestinationInfo{
+		PVCName: rdSpec.PVCName,
+		Address: *rd.Status.Rsync.Address,
+	}, nil
+}
+
+func (r *VolSyncReconciler) ReconcileRS(rsSpec ramendrv1alpha1.ReplicationSourceSpec) error {
+	l := r.log.WithValues("rsSpec", rsSpec)
+
+	rs := &volsyncv1alpha1.ReplicationSource{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      rsSpec.PVCName, // Use PVC name as name of ReplicationSource
+			Namespace: r.owner.GetNamespace(),
+		},
+	}
+
+	op, err := ctrlutil.CreateOrUpdate(r.ctx, r.client, rs, func() error {
+		if err := ctrl.SetControllerReference(r.owner, rs, r.client.Scheme()); err != nil {
+			l.Error(err, "unable to set controller reference")
+			return err
+		}
+
+		rs.Spec.SourcePVC = rsSpec.PVCName
+
+		//TODO: need to figure out how to set trigger (schedule)
+		//rd.Spec.Trigger = &volsyncv1alpha1.ReplicationDestinationTriggerSpec{}
+
+		rs.Spec.Rsync = &volsyncv1alpha1.ReplicationSourceRsyncSpec{
+			SSHKeys: &rsSpec.SSHKeys,
+			Address: &rsSpec.Address,
+
+			ReplicationSourceVolumeOptions: volsyncv1alpha1.ReplicationSourceVolumeOptions{
+				CopyMethod: volsyncv1alpha1.CopyMethodSnapshot,
+			},
+		}
+
+		return nil
+	})
+
+	l.V(1).Info("ReplicationSource createOrUpdate Complete", "op", op)
+	if err != nil {
+		return err
+	}
+
+	l.V(1).Info("ReplicationSource Reconcile Complete")
+	return nil
 }

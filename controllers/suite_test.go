@@ -31,6 +31,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	volsyncv1alpha1 "github.com/backube/volsync/api/v1alpha1"
 	volrep "github.com/csi-addons/volume-replication-operator/api/v1alpha1"
 	ocmclv1 "github.com/open-cluster-management/api/cluster/v1"
 	ocmworkv1 "github.com/open-cluster-management/api/work/v1"
@@ -94,7 +95,7 @@ var _ = BeforeSuite(func() {
 	err = volrep.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 
-	err = ramendrv1alpha1.AddToScheme(scheme.Scheme)
+	err = volsyncv1alpha1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 
 	// +kubebuilder:scaffold:scheme

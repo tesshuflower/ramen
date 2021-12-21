@@ -460,8 +460,12 @@ func (v *VSRGInstance) processAsPrimary() (ctrl.Result, error) {
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	requeue := v.reconcileVolSyncAsPrimary()
+	if err := v.reconcileVolSyncAsPrimary(); err != nil {
+		v.log.Error(err, "Failed to reconcile VolSyncAsPrimary")
+		return ctrl.Result{}, err
+	}
 
+	requeue := false
 	// If requeue is false, then VolSync was successfully processed as primary.
 	// Hence the event to be generated is Success of type normal.
 	// Expectation is that, if something failed and requeue is true, then
@@ -523,25 +527,22 @@ func (v *VSRGInstance) restorePVCs() error {
 	return nil
 }
 
-func (v *VSRGInstance) reconcileVolSyncAsPrimary() bool {
-	if len(v.instance.Spec.RSSpec) != 0 {
-		ok := v.setupReplicationSource()
-		if !ok {
-			return false
+func (v *VSRGInstance) reconcileVolSyncAsPrimary() error {
+	// Reconcile RSSpec (deletion or replication)
+	for _, rsSpec := range v.instance.Spec.RSSpec {
+		err := v.volsyncReconciler.ReconcileRS(rsSpec)
+		if err != nil {
+			return err
 		}
 	}
+	//TODO: cleanup any RS that is not in rsSpec
 
 	if len(v.pvcList.Items) != len(v.instance.Status.VolSyncPVCs) {
 		v.updateInstanceStatus()
 	}
 
 	v.log.Info("Successfully reconciled VolSync as Primary")
-
-	return true
-}
-
-func (v *VSRGInstance) setupReplicationSource() bool {
-	return true
+	return nil
 }
 
 func (v *VSRGInstance) updateInstanceStatus() {
@@ -631,7 +632,7 @@ func (v *VSRGInstance) processAsSecondary() (ctrl.Result, error) {
 
 // reconcileVRsAsSecondary reconciles VolumeReplication resources for the VolSync as secondary
 func (v *VSRGInstance) reconcileVolSyncAsSecondary() error {
-	// Reconcile (deletion or replication)
+	// Reconcile RDSpec (deletion or replication)
 	for _, rdSpec := range v.instance.Spec.RDSpec {
 		rdInfoForStatus, err := v.volsyncReconciler.ReconcileRD(rdSpec)
 		if err != nil {
@@ -639,17 +640,16 @@ func (v *VSRGInstance) reconcileVolSyncAsSecondary() error {
 		}
 		if rdInfoForStatus != nil {
 			// Update the VSRG status with this rdInfo
-			v.updateStatusWithRDInfo(rdInfoForStatus)
+			v.updateStatusWithRDInfo(*rdInfoForStatus)
 		}
 	}
-	//TODO: cleanup any RD that is not in rdInfoSpec
+	//TODO: cleanup any RD that is not in rdSpec
 
 	v.log.Info("Successfully reconciled VolSync as Secondary")
-
 	return nil
 }
 
-func (v *VSRGInstance) updateStatusWithRDInfo(rdInfoForStatus *ramendrv1alpha1.ReplicationDestinationInfo) {
+func (v *VSRGInstance) updateStatusWithRDInfo(rdInfoForStatus ramendrv1alpha1.ReplicationDestinationInfo) {
 	if v.instance.Status.RDInfo == nil {
 		v.instance.Status.RDInfo = []ramendrv1alpha1.ReplicationDestinationInfo{}
 	}
@@ -658,14 +658,14 @@ func (v *VSRGInstance) updateStatusWithRDInfo(rdInfoForStatus *ramendrv1alpha1.R
 	for i := range v.instance.Status.RDInfo {
 		if v.instance.Status.RDInfo[i].PVCName == rdInfoForStatus.PVCName {
 			// blindly replace with our updated RDInfo status
-			v.instance.Status.RDInfo[i] = *rdInfoForStatus
+			v.instance.Status.RDInfo[i] = rdInfoForStatus
 			found = true
 			break
 		}
 	}
 	if !found {
 		// Append the new RDInfo to the status
-		v.instance.Status.RDInfo = append(v.instance.Status.RDInfo, *rdInfoForStatus)
+		v.instance.Status.RDInfo = append(v.instance.Status.RDInfo, rdInfoForStatus)
 	}
 }
 
