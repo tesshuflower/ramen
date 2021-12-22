@@ -140,7 +140,7 @@ func (mwu *MWUtil) CreateOrUpdateVRGManifestWork(
 
 func (mwu *MWUtil) CreateOrUpdateVolSyncManifestWork(
 	name, namespace, homeCluster string,
-	drPolicy *rmn.DRPolicy, pvcSelector metav1.LabelSelector) error {
+	drPolicy *rmn.DRPolicy, pvcSelector metav1.LabelSelector, repState rmn.ReplicationState) error {
 	schedulingInterval := drPolicy.Spec.SchedulingInterval
 	replClassSelector := drPolicy.Spec.ReplicationClassSelector
 
@@ -148,7 +148,7 @@ func (mwu *MWUtil) CreateOrUpdateVolSyncManifestWork(
 		name, namespace, homeCluster))
 
 	manifestWork, err := mwu.generateVolSyncManifestWork(name, namespace, homeCluster,
-		pvcSelector, schedulingInterval, replClassSelector)
+		pvcSelector, schedulingInterval, replClassSelector, repState)
 	if err != nil {
 		return err
 	}
@@ -180,9 +180,9 @@ func (mwu *MWUtil) generateVRGManifestWork(
 func (mwu *MWUtil) generateVolSyncManifestWork(
 	name, namespace, homeCluster string,
 	pvcSelector metav1.LabelSelector, schedulingInterval string,
-	replClassSelector metav1.LabelSelector) (*ocmworkv1.ManifestWork, error) {
+	replClassSelector metav1.LabelSelector, repState rmn.ReplicationState) (*ocmworkv1.ManifestWork, error) {
 	vrgClientManifest, err := mwu.generateVolSyncManifest(name, namespace,
-		pvcSelector, schedulingInterval, replClassSelector)
+		pvcSelector, schedulingInterval, replClassSelector, repState)
 	if err != nil {
 		mwu.Log.Error(err, "failed to generate VolumeReplicationGroup manifest")
 
@@ -218,14 +218,14 @@ func (mwu *MWUtil) generateVRGManifest(
 func (mwu *MWUtil) generateVolSyncManifest(
 	name, namespace string,
 	pvcSelector metav1.LabelSelector, schedulingInterval string,
-	replClassSelector metav1.LabelSelector) (*ocmworkv1.Manifest, error) {
+	replClassSelector metav1.LabelSelector, repState rmn.ReplicationState) (*ocmworkv1.Manifest, error) {
 	return mwu.GenerateManifest(&rmn.VolSyncReplicationGroup{
 		TypeMeta:   metav1.TypeMeta{Kind: "VolumeReplicationGroup", APIVersion: "ramendr.openshift.io/v1alpha1"},
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec: rmn.VolSyncReplicationGroupSpec{
 			PVCSelector:              pvcSelector,
 			SchedulingInterval:       schedulingInterval,
-			ReplicationState:         rmn.Primary,
+			ReplicationState:         repState,
 			ReplicationClassSelector: replClassSelector,
 		},
 	})

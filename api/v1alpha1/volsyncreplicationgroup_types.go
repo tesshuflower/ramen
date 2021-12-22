@@ -38,19 +38,11 @@ type ReplicationDestinationSpec struct {
 type ReplicationDestinationInfo struct {
 	PVCName string `json:"pvcName"`
 	Address string `json:"address"`
-	SSHKeys string `json:"sshKeys,omitempty"`
 }
 
 type ReplicationSourceSpec struct {
 	PVCName string `json:"pvcName"`
 	Address string `json:"address"`
-	SSHKeys string `json:"sshKeys,omitempty"`
-	//Capacity         *resource.Quantity `json:"capacity"`
-	//StorageClassName *string            `json:"storageClassName,omitempty"`
-}
-
-type ReplicationSourceInfo struct {
-	PVCName string `json:"pvcName"`
 	SSHKeys string `json:"sshKeys,omitempty"`
 }
 
@@ -82,17 +74,26 @@ type VolSyncReplicationGroupSpec struct {
 	RSSpec []ReplicationSourceSpec      `json:"rsSpec,omitempty"`
 }
 
+type VolSyncPVCInfo struct {
+	// Name of the PVC resource
+	Name string `json:"name"`
+
+	// Represents the actual resources of the underlying volume.
+	Capacity *resource.Quantity `json:"capacity,omitempty"`
+
+	// Name of the StorageClass required by the claim.
+	StorageClassName *string `json:"storageClassName,omitempty"`
+}
+
 // VolSyncReplicationGroupStatus defines the observed state of VolSyncReplicationGroup
 type VolSyncReplicationGroupStatus struct {
 	State State `json:"state,omitempty"`
 
 	// All the protected pvcs
-	ProtectedPVCs []ProtectedPVC `json:"protectedPVCs,omitempty"`
+	VolSyncPVCs []VolSyncPVCInfo `json:"volSyncPVCs,omitempty"`
 
 	// Info about created RDs (should only be filled out by VSGR with ReplicateionState: secondary)
 	RDInfo []ReplicationDestinationInfo `json:"rdInfo,omitempty"`
-	// Info about created RSs (should only be filled out by VSGR with ReplicateionState: primary)
-	RSInfo []ReplicationSourceInfo `json:"rsInfo,omitempty"`
 
 	// Conditions are the list of VRG's summary conditions and their status.
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
