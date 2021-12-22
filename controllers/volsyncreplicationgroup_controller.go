@@ -501,11 +501,11 @@ func (v *VSRGInstance) restorePVCs() error {
 	msg := "Restoring PV cluster data"
 	setVRGClusterDataProgressingCondition(&v.instance.Status.Conditions, v.instance.Generation, msg)
 
-	v.log.Info("Restoring PVCs to this managed cluster.", "RDInfo", v.instance.Spec.RDInfo)
+	v.log.Info("Restoring PVCs to this managed cluster.", "RDInfo", v.instance.Spec.RDSpec)
 
 	success := false
 
-	for _, rdInfo := range v.instance.Spec.RDInfo {
+	for _, rdInfo := range v.instance.Spec.RDSpec {
 
 		setVRGClusterDataReadyCondition(&v.instance.Status.Conditions, v.instance.Generation, msg)
 
@@ -517,14 +517,14 @@ func (v *VSRGInstance) restorePVCs() error {
 	}
 
 	if !success {
-		return fmt.Errorf("failed to restorePVCs using RDInfos (%v)", v.instance.Spec.RDInfo)
+		return fmt.Errorf("failed to restorePVCs using RDInfos (%v)", v.instance.Spec.RDSpec)
 	}
 
 	return nil
 }
 
 func (v *VSRGInstance) reconcileVolSyncAsPrimary() bool {
-	if len(v.instance.Spec.RSInfo) != 0 {
+	if len(v.instance.Spec.RSSpec) != 0 {
 		ok := v.setupReplicationSource()
 		if !ok {
 			return false
@@ -631,7 +631,7 @@ func (v *VSRGInstance) processAsSecondary() (ctrl.Result, error) {
 
 // reconcileVRsAsSecondary reconciles VolumeReplication resources for the VolSync as secondary
 func (v *VSRGInstance) reconcileVolSyncAsSecondary() error {
-	// Reconcile RSInfo (deletion or replication)
+	// Reconcile (deletion or replication)
 	for _, rdSpec := range v.instance.Spec.RDSpec {
 		rdInfoForStatus, err := v.volsyncReconciler.ReconcileRD(rdSpec)
 		if err != nil {
@@ -666,26 +666,6 @@ func (v *VSRGInstance) updateStatusWithRDInfo(rdInfoForStatus *ramendrv1alpha1.R
 	if !found {
 		// Append the new RDInfo to the status
 		v.instance.Status.RDInfo = append(v.instance.Status.RDInfo, *rdInfoForStatus)
-	}
-}
-
-func (v *VSRGInstance) updateStatusWithRSInfo(rsInfoForStatus *ramendrv1alpha1.ReplicationSourceInfo) {
-	if v.instance.Status.RSInfo == nil {
-		v.instance.Status.RSInfo = []ramendrv1alpha1.ReplicationSourceInfo{}
-	}
-
-	found := false
-	for i := range v.instance.Status.RSInfo {
-		if v.instance.Status.RSInfo[i].PVCName == rsInfoForStatus.PVCName {
-			// blindly replace with our updated RSInfo status
-			v.instance.Status.RSInfo[i] = *rsInfoForStatus
-			found = true
-			break
-		}
-	}
-	if !found {
-		// Append the new RSInfo to the status
-		v.instance.Status.RSInfo = append(v.instance.Status.RSInfo, *rsInfoForStatus)
 	}
 }
 

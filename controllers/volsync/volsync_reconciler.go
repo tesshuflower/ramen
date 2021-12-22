@@ -98,7 +98,6 @@ func (r *VolSyncReconciler) ReconcileRD(rdSpec ramendrv1alpha1.ReplicationDestin
 		l.V(1).Info("ReplicationDestination Reconcile Complete")
 		return &ramendrv1alpha1.ReplicationDestinationInfo{
 			PVCName: rdSpec.PVCName,
-			SSHKeys: *rd.Status.Rsync.SSHKeys,
 			Address: *rd.Status.Rsync.Address,
 		}, nil
 	}

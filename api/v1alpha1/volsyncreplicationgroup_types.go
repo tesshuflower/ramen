@@ -38,19 +38,11 @@ type ReplicationDestinationSpec struct {
 type ReplicationDestinationInfo struct {
 	PVCName string `json:"pvcName"`
 	Address string `json:"address"`
-	SSHKeys string `json:"sshKeys,omitempty"`
 }
 
 type ReplicationSourceSpec struct {
 	PVCName string `json:"pvcName"`
 	Address string `json:"address"`
-	SSHKeys string `json:"sshKeys,omitempty"`
-	//Capacity         *resource.Quantity `json:"capacity"`
-	//StorageClassName *string            `json:"storageClassName,omitempty"`
-}
-
-type ReplicationSourceInfo struct {
-	PVCName string `json:"pvcName"`
 	SSHKeys string `json:"sshKeys,omitempty"`
 }
 
@@ -78,8 +70,8 @@ type VolSyncReplicationGroupSpec struct {
 	// this value is propagated to children VolumeReplication CRs
 	ReplicationState ReplicationState `json:"replicationState"`
 
-	RDInfo []ReplicationDestinationSpec `json:"rdInfo,omitempty"`
-	RSInfo []ReplicationSourceSpec      `json:"rsInfo,omitempty"`
+	RDSpec []ReplicationDestinationSpec `json:"rdSpec,omitempty"`
+	RSSpec []ReplicationSourceSpec      `json:"rsSpec,omitempty"`
 }
 
 type VolSyncPVCInfo struct {
@@ -102,8 +94,6 @@ type VolSyncReplicationGroupStatus struct {
 
 	// Info about created RDs (should only be filled out by VSGR with ReplicateionState: secondary)
 	RDInfo []ReplicationDestinationInfo `json:"rdInfo,omitempty"`
-	// Info about created RSs (should only be filled out by VSGR with ReplicateionState: primary)
-	RSInfo []ReplicationSourceInfo `json:"rsInfo,omitempty"`
 
 	// Conditions are the list of VRG's summary conditions and their status.
 	Conditions []metav1.Condition `json:"conditions,omitempty"`

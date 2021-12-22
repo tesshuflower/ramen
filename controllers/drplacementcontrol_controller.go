@@ -62,8 +62,6 @@ const (
 	SanityCheckDelay = time.Minute * 10
 )
 
-var WaitForPVRestoreToComplete = errorswrapper.New("Waiting for PV restore to complete")
-
 var InitialWaitTimeForDRPCPlacementRule = errorswrapper.New("Waiting for DRPC Placement to produces placement decision")
 
 // ProgressCallback of function type
@@ -963,7 +961,7 @@ func (r *DRPlacementControlReconciler) getVRGsFromManagedClusters(drpc *rmn.DRPl
 		}
 
 		var resource interface{}
-		var err error 
+		var err error
 		if drpc.Spec.VolumeReplicationPlugin == rmn.VolSync {
 			resource, err = r.MCVGetter.GetVSRGFromManagedCluster(drpc.Name, drpc.Namespace, drCluster.Name)
 		} else {
