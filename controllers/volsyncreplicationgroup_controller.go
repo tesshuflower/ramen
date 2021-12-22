@@ -77,7 +77,7 @@ func (r *VolSyncReplicationGroupReconciler) SetupWithManager(mgr ctrl.Manager) e
 
 	r.eventRecorder = rmnutil.NewEventReporter(mgr.GetEventRecorderFor("controller_VolumeReplicationGroup"))
 
-	r.Log.Info("Adding VolumeReplicationGroup controller")
+	r.Log.Info("Adding VolSyncReplicationGroup controller")
 
 	return ctrl.NewControllerManagedBy(mgr).
 		WithOptions(ctrlcontroller.Options{MaxConcurrentReconciles: getMaxConcurrentReconciles()}).
