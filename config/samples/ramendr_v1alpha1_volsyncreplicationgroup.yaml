@@ -3,4 +3,8 @@ kind: VolSyncReplicationGroup
 metadata:
   name: volsyncreplicationgroup-sample
 spec:
-  # Add fields here
+  pvcSelector:
+    matchLabels:
+      any-pvc-label: value
+  schedulingInterval: "1h"
+  replicationState: "primary"
