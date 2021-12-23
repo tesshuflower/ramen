@@ -74,6 +74,30 @@ rules:
   - update
   - watch
 - apiGroups:
+  - volsync.backube
+  resources:
+  - replicationdestinations
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - volsync.backube
+  resources:
+  - replicationsources
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - replication.storage.openshift.io
   resources:
   - volumereplicationclasses

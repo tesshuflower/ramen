@@ -174,6 +174,9 @@ func updateEventDecisionForVolSync(oldPVC *corev1.PersistentVolumeClaim,
 //+kubebuilder:rbac:groups=ramendr.openshift.io,resources=volsyncreplicationgroups/finalizers,verbs=update
 
 // +kubebuilder:rbac:groups=replication.storage.openshift.io,resources=volumereplicationclasses,verbs=get;list;watch
+
+// +kubebuilder:rbac:groups=volsync.backube,resources=replicationdestinations,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=volsync.backube,resources=replicationsources,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=get;create;patch;update
 // +kubebuilder:rbac:groups="",namespace=system,resources=secrets,verbs=get
