@@ -13,6 +13,8 @@ spec:
     kind: VolSyncReplicationGroup
     listKind: VolSyncReplicationGroupList
     plural: volsyncreplicationgroups
+    shortNames:
+    - vsrg
     singular: volsyncreplicationgroup
   scope: Namespaced
   versions:

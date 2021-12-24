@@ -106,6 +106,7 @@ type VolSyncReplicationGroupStatus struct {
 
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
+//+kubebuilder:resource:shortName=vsrg
 
 // VolSyncReplicationGroup is the Schema for the volsyncreplicationgroups API
 type VolSyncReplicationGroup struct {
