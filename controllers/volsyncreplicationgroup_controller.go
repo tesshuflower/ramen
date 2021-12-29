@@ -173,6 +173,9 @@ func updateEventDecisionForVolSync(oldPVC *corev1.PersistentVolumeClaim,
 //+kubebuilder:rbac:groups=ramendr.openshift.io,resources=volsyncreplicationgroups/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=ramendr.openshift.io,resources=volsyncreplicationgroups/finalizers,verbs=update
 
+//+kubebuilder:rbac:groups=snapshot.storage.k8s.io,resources=volumesnapshots,verbs=get;list;watch;update;patch
+//+kubebuilder:rbac:groups=snapshot.storage.k8s.io,resources=volumesnapshots/finalizers,verbs=update
+
 // +kubebuilder:rbac:groups=replication.storage.openshift.io,resources=volumereplicationclasses,verbs=get;list;watch
 
 // +kubebuilder:rbac:groups=volsync.backube,resources=replicationdestinations,verbs=get;list;watch;create;update;patch;delete
@@ -221,7 +224,7 @@ func (r *VolSyncReplicationGroupReconciler) Reconcile(ctx context.Context, req c
 			req.NamespacedName, err)
 	}
 
-	v.volsyncReconciler = volsync.NewVolSyncReconciler(
+	v.volSyncHandler = volsync.NewVSHandler(
 		ctx, r.Client, log, v.instance, v.instance.Spec.SchedulingInterval)
 
 	// Save a copy of the instance status to be used for the VolSync status update comparison
@@ -243,10 +246,11 @@ type VSRGInstance struct {
 	pvcList             *corev1.PersistentVolumeClaimList
 	replClassList       *volrep.VolumeReplicationClassList
 	//vrcUpdated          bool
-	namespacedName    string
-	volsyncReconciler *volsync.VolSyncReconciler
+	namespacedName string
+	volSyncHandler *volsync.VSHandler
 }
 
+//TODO: rename processVSRG? or even just process() ?
 func (v *VSRGInstance) processVolSync() (ctrl.Result, error) {
 	v.initializeStatus()
 
@@ -437,8 +441,9 @@ func (v *VSRGInstance) processAsPrimary() (ctrl.Result, error) {
 
 	defer v.log.Info("Exiting processing VolSyncReplicationGroup")
 
+	//TODO: this is done for processAsSecondary too - move to processVolSync() (parent func)
 	if err := v.addFinalizer(vsrgFinalizerName); err != nil {
-		v.log.Info("Failed to add finalizer", "finalizer", vsrgFinalizerName, "errorValue", err)
+		v.log.Error(err, "Failed to add finalizer", "finalizer", vsrgFinalizerName)
 
 		msg := "Failed to add finalizer to VolSyncReplicationGroup"
 		setVRGDataErrorCondition(&v.instance.Status.Conditions, v.instance.Generation, msg)
@@ -447,11 +452,13 @@ func (v *VSRGInstance) processAsPrimary() (ctrl.Result, error) {
 			v.log.Error(err, "VolSync Status update failed")
 		}
 
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{}, err
 	}
 
+	// In failover scenario where this VSRG instance was previously a secondary - we will have RDSpec[] with current
+	// replication destinations.  Now that this VSRG instance is primary - restore PVCS by examining the RDSpec[]
 	if err := v.restorePVCs(); err != nil {
-		v.log.Info("Restoring PVCs failed", "errorValue", err)
+		v.log.Error(err, "Restoring PVCs failed")
 
 		msg := fmt.Sprintf("Failed to restore PVCs (%v)", err.Error())
 		setVRGClusterDataErrorCondition(&v.instance.Status.Conditions, v.instance.Generation, msg)
@@ -460,10 +467,10 @@ func (v *VSRGInstance) processAsPrimary() (ctrl.Result, error) {
 			v.log.Error(err, "VolSync Status update failed")
 		}
 
-		// Since updating status failed, reconcile
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{}, err
 	}
 
+	// Process as primary as per initial deploy
 	if err := v.reconcileVolSyncAsPrimary(); err != nil {
 		v.log.Error(err, "Failed to reconcile VolSyncAsPrimary")
 		return ctrl.Result{}, err
@@ -497,53 +504,59 @@ func (v *VSRGInstance) restorePVCs() error {
 	clusterDataReady := findCondition(v.instance.Status.Conditions, VRGConditionTypeClusterDataReady)
 	if clusterDataReady != nil && clusterDataReady.Status == metav1.ConditionTrue &&
 		clusterDataReady.ObservedGeneration == v.instance.Generation {
-		v.log.Info("VolSyncReplicationGroup's ClusterDataReady condition found. PV restore must have already been applied")
+		v.log.Info("VolSyncReplicationGroup's ClusterDataReady condition found. PVC restore must have already been applied")
 
 		return nil
 	}
 
-	// if len(v.instance.Spec.S3Profiles) == 0 {
-	// return fmt.Errorf("no S3Profiles configured")
-	// }
+	if len(v.instance.Spec.RDSpec) == 0 {
+		v.log.Info("VolSyncReplicationGroup no RDSpec entries, no PVCs to restore")
+		// No ReplicationDestinations (i.e. no PVCs) to restore
+		return nil
+	}
 
-	msg := "Restoring PV cluster data"
+	msg := "Restoring PVC cluster data"
 	setVRGClusterDataProgressingCondition(&v.instance.Status.Conditions, v.instance.Generation, msg)
+	v.log.Info("Restoring PVCs to this managed cluster.", "RDSpec", v.instance.Spec.RDSpec)
 
-	v.log.Info("Restoring PVCs to this managed cluster.", "RDInfo", v.instance.Spec.RDSpec)
+	success := true
+	for _, rdSpec := range v.instance.Spec.RDSpec {
+		//TODO: Restore volume - if failure, set success=false
+		err := v.volSyncHandler.EnsurePVCfromRD(rdSpec)
+		if err != nil {
+			v.log.Error(err, "Unable to ensure PVC", "rdSpec", rdSpec)
+			success = false
+			continue // Keep trying to ensure PVCs for other rdSpec
+		}
 
-	success := false
-
-	for _, rdInfo := range v.instance.Spec.RDSpec {
-
-		setVRGClusterDataReadyCondition(&v.instance.Status.Conditions, v.instance.Generation, msg)
-
-		v.log.Info("Restored PVC", "rdInfo", rdInfo)
-
-		success = true
-
-		break
+		//TODO: Need any status to indicate which PVCs we've restored? - overall clusterDataReady is set below already
 	}
 
 	if !success {
 		return fmt.Errorf("failed to restorePVCs using RDInfos (%v)", v.instance.Spec.RDSpec)
 	}
 
+	msg = "PVC cluster data restored"
+	setVRGClusterDataReadyCondition(&v.instance.Status.Conditions, v.instance.Generation, msg)
+	v.log.Info(msg, "RDSpec", v.instance.Spec.RDSpec)
+
 	return nil
 }
 
 func (v *VSRGInstance) reconcileVolSyncAsPrimary() error {
+	// Make sure status.VolSyncPVCs matches our pvcList (bound pvcs to protect)
+	if len(v.pvcList.Items) != len(v.instance.Status.VolSyncPVCs) {
+		v.updateInstanceStatus()
+	}
+
 	// Reconcile RSSpec (deletion or replication)
 	for _, rsSpec := range v.instance.Spec.RSSpec {
-		err := v.volsyncReconciler.ReconcileRS(rsSpec)
+		err := v.volSyncHandler.ReconcileRS(rsSpec)
 		if err != nil {
 			return err
 		}
 	}
 	//TODO: cleanup any RS that is not in rsSpec
-
-	if len(v.pvcList.Items) != len(v.instance.Status.VolSyncPVCs) {
-		v.updateInstanceStatus()
-	}
 
 	v.log.Info("Successfully reconciled VolSync as Primary")
 	return nil
@@ -638,7 +651,7 @@ func (v *VSRGInstance) processAsSecondary() (ctrl.Result, error) {
 func (v *VSRGInstance) reconcileVolSyncAsSecondary() error {
 	// Reconcile RDSpec (deletion or replication)
 	for _, rdSpec := range v.instance.Spec.RDSpec {
-		rdInfoForStatus, err := v.volsyncReconciler.ReconcileRD(rdSpec)
+		rdInfoForStatus, err := v.volSyncHandler.ReconcileRD(rdSpec)
 		if err != nil {
 			return err
 		}

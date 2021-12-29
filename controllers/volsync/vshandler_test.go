@@ -9,6 +9,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -22,7 +24,7 @@ const (
 	interval = 250 * time.Millisecond
 )
 
-var _ = Describe("VolSyncReconciler - utils", func() {
+var _ = Describe("VolSync Handler - utils", func() {
 	Context("When converting scheduling interval to cronspec for VolSync", func() {
 		It("Should successfully convert an interval specified in minutes", func() {
 			cronSpecSchedule, err := volsync.ConvertSchedulingIntervalToCronSpec("10m")
@@ -59,12 +61,12 @@ var _ = Describe("VolSyncReconciler - utils", func() {
 	})
 })
 
-var _ = Describe("VolSyncReconciler", func() {
+var _ = Describe("VolSync Handler", func() {
 	var testNamespace *corev1.Namespace
 	logger := zap.New(zap.UseDevMode(true), zap.WriteTo(GinkgoWriter))
 
 	var owner metav1.Object
-	var volsyncReconciler *volsync.VolSyncReconciler
+	var vsHandler *volsync.VSHandler
 
 	schedulingInterval := "5m"
 	expectedCronSpecSchedule := "*/5 * * * *"
@@ -89,10 +91,10 @@ var _ = Describe("VolSyncReconciler", func() {
 			},
 		}
 		Expect(k8sClient.Create(ctx, ownerCm)).To(Succeed())
-		Expect(testNamespace.GetName()).NotTo(BeEmpty())
+		Expect(ownerCm.GetName()).NotTo(BeEmpty())
 		owner = ownerCm
 
-		volsyncReconciler = volsync.NewVolSyncReconciler(ctx, k8sClient, logger, owner, schedulingInterval)
+		vsHandler = volsync.NewVSHandler(ctx, k8sClient, logger, owner, schedulingInterval)
 	})
 
 	AfterEach(func() {
@@ -116,7 +118,7 @@ var _ = Describe("VolSyncReconciler", func() {
 			JustBeforeEach(func() {
 				// Run ReconcileRD
 				var err error
-				returnedRDInfo, err = volsyncReconciler.ReconcileRD(rdSpec)
+				returnedRDInfo, err = vsHandler.ReconcileRD(rdSpec)
 				Expect(err).ToNot(HaveOccurred())
 
 				// RD should be created with name=PVCName
@@ -218,7 +220,7 @@ var _ = Describe("VolSyncReconciler", func() {
 
 			JustBeforeEach(func() {
 				// Run ReconcileRS
-				err := volsyncReconciler.ReconcileRS(rsSpec)
+				err := vsHandler.ReconcileRS(rsSpec)
 				Expect(err).ToNot(HaveOccurred())
 
 				// RS should be created with name=PVCName
@@ -275,6 +277,146 @@ var _ = Describe("VolSyncReconciler", func() {
 			})
 		})
 	})
+
+	Describe("Ensure PVC from ReplicationDestination", func() {
+		pvcName := "testpvc1"
+		pvcCapacity := resource.MustParse("1Gi")
+		pvcStorageClassName := "teststorageclass"
+
+		rdSpec := ramendrv1alpha1.ReplicationDestinationSpec{
+			PVCName:          pvcName,
+			SSHKeys:          "testsecret",
+			Capacity:         &pvcCapacity,
+			StorageClassName: &pvcStorageClassName,
+		}
+
+		var ensurePVCErr error
+		JustBeforeEach(func() {
+			ensurePVCErr = vsHandler.EnsurePVCfromRD(rdSpec)
+		})
+
+		Context("When ReplicationDestination Does not exist", func() {
+			It("Should not throw an error", func() { // Ignoring if RD is not there right now
+				Expect(ensurePVCErr).NotTo(HaveOccurred())
+			})
+		})
+
+		Context("When ReplicationDestination exists with no latestImage", func() {
+			BeforeEach(func() {
+				// Pre-create the replication destination
+				rd := &volsyncv1alpha1.ReplicationDestination{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      pvcName,
+						Namespace: testNamespace.GetName(),
+					},
+					Spec: volsyncv1alpha1.ReplicationDestinationSpec{
+						Rsync: &volsyncv1alpha1.ReplicationDestinationRsyncSpec{},
+					},
+				}
+				Expect(k8sClient.Create(ctx, rd)).To(Succeed())
+			})
+			It("Should fail to ensure PVC", func() {
+				Expect(ensurePVCErr).To(HaveOccurred())
+				Expect(ensurePVCErr.Error()).To(ContainSubstring("unable to find LatestImage"))
+			})
+		})
+
+		Context("When ReplicationDestination exists with snapshot latestImage", func() {
+			latestImageSnapshotName := "testingsnap001"
+
+			BeforeEach(func() {
+				// Pre-create the replication destination
+				rd := &volsyncv1alpha1.ReplicationDestination{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      pvcName,
+						Namespace: testNamespace.GetName(),
+					},
+					Spec: volsyncv1alpha1.ReplicationDestinationSpec{
+						Rsync: &volsyncv1alpha1.ReplicationDestinationRsyncSpec{},
+					},
+				}
+				Expect(k8sClient.Create(ctx, rd)).To(Succeed())
+
+				apiGrp := volsync.VolumeSnapshotGroup
+				// Now force update the status to report a volume snapshot as latestImage
+				rd.Status = &volsyncv1alpha1.ReplicationDestinationStatus{
+					LatestImage: &corev1.TypedLocalObjectReference{
+						Kind:     volsync.VolumeSnapshotKind,
+						APIGroup: &apiGrp,
+						Name:     latestImageSnapshotName,
+					},
+				}
+				Expect(k8sClient.Status().Update(ctx, rd)).To(Succeed())
+			})
+
+			Context("When the latest image volume snapshot does not exist", func() {
+				It("Should fail to ensure PVC", func() {
+					Expect(ensurePVCErr).To(HaveOccurred())
+					Expect(ensurePVCErr.Error()).To(ContainSubstring("volumesnapshots"))
+					Expect(ensurePVCErr.Error()).To(ContainSubstring("not found"))
+					Expect(ensurePVCErr.Error()).To(ContainSubstring(latestImageSnapshotName))
+				})
+			})
+
+			Context("When the latest image volume snapshot exists", func() {
+				var latestImageSnap *unstructured.Unstructured
+				BeforeEach(func() {
+					// Create a fake volume snapshot
+					var err error
+					latestImageSnap, err = createSnapshot(latestImageSnapshotName, testNamespace.GetName())
+					Expect(err).NotTo(HaveOccurred())
+				})
+
+				JustBeforeEach(func() {
+					// Common checks for everything in this context - pvc should be created with correct spec
+					Expect(ensurePVCErr).NotTo(HaveOccurred())
+
+					pvc := &corev1.PersistentVolumeClaim{}
+					Eventually(func() error {
+						return k8sClient.Get(ctx, types.NamespacedName{
+							Name:      pvcName,
+							Namespace: testNamespace.GetName(),
+						}, pvc)
+					}, maxWait, interval).Should(Succeed())
+
+					Expect(pvc.GetName()).To(Equal(pvcName))
+					Expect(pvc.Spec.AccessModes).To(Equal([]corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}))
+					Expect(*pvc.Spec.StorageClassName).To(Equal(pvcStorageClassName))
+					apiGrp := volsync.VolumeSnapshotGroup
+					Expect(pvc.Spec.DataSource).To(Equal(&corev1.TypedLocalObjectReference{
+						Name:     latestImageSnapshotName,
+						APIGroup: &apiGrp,
+						Kind:     volsync.VolumeSnapshotKind,
+					}))
+					Expect(pvc.Spec.Resources.Requests).To(Equal(corev1.ResourceList{
+						corev1.ResourceStorage: pvcCapacity,
+					}))
+				})
+
+				It("PVC should be created, latestImage VolumeSnapshot should have a finalizer added", func() {
+					Eventually(func() bool {
+						err := k8sClient.Get(ctx, types.NamespacedName{
+							Name:      latestImageSnapshotName,
+							Namespace: testNamespace.GetName(),
+						}, latestImageSnap)
+						if err != nil {
+							return false
+						}
+						return len(latestImageSnap.GetFinalizers()) == 1 &&
+							latestImageSnap.GetFinalizers()[0] == volsync.VolumeSnapshotProtectFinalizerName
+					}, maxWait, interval).Should(BeTrue())
+				})
+
+				Context("When pvc has already been created", func() {
+					It("ensure PVC should not fail", func() {
+						// Previous ensurePVC will already have created the PVC (see parent context)
+						// Now run ensurePVC again - additional runs should just ensure the PVC is ok
+						Expect(vsHandler.EnsurePVCfromRD(rdSpec)).To(Succeed())
+					})
+				})
+			})
+		})
+	})
 })
 
 func ownerMatches(obj metav1.Object, ownerName, ownerKind string) bool {
@@ -285,4 +427,26 @@ func ownerMatches(obj metav1.Object, ownerName, ownerKind string) bool {
 	}
 
 	return false
+}
+
+func createSnapshot(snapshotName, namespace string) (*unstructured.Unstructured, error) {
+	volSnap := &unstructured.Unstructured{}
+	volSnap.Object = map[string]interface{}{
+		"metadata": map[string]interface{}{
+			"name":      snapshotName,
+			"namespace": namespace,
+		},
+		"spec": map[string]interface{}{
+			"source": map[string]interface{}{
+				"persistentVolumeClaimName": "fakepvcnamehere",
+			},
+		},
+	}
+	volSnap.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   volsync.VolumeSnapshotGroup,
+		Kind:    volsync.VolumeSnapshotKind,
+		Version: volsync.VolumeSnapshotVersion,
+	})
+
+	return volSnap, k8sClient.Create(ctx, volSnap)
 }
