@@ -221,7 +221,8 @@ func (r *VolSyncReplicationGroupReconciler) Reconcile(ctx context.Context, req c
 			req.NamespacedName, err)
 	}
 
-	v.volsyncReconciler = volsync.NewVolSyncReconciler(ctx, r.Client, log, v.instance)
+	v.volsyncReconciler = volsync.NewVolSyncReconciler(
+		ctx, r.Client, log, v.instance, v.instance.Spec.SchedulingInterval)
 
 	// Save a copy of the instance status to be used for the VolSync status update comparison
 	v.instance.Status.DeepCopyInto(&v.savedInstanceStatus)

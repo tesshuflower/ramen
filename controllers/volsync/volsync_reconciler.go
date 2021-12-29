@@ -18,6 +18,8 @@ package volsync
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	volsyncv1alpha1 "github.com/backube/volsync/api/v1alpha1"
 	"github.com/go-logr/logr"
@@ -30,22 +32,27 @@ import (
 )
 
 type VolSyncReconciler struct {
-	ctx    context.Context
-	client client.Client
-	log    logr.Logger
-	owner  metav1.Object
+	ctx                context.Context
+	client             client.Client
+	log                logr.Logger
+	owner              metav1.Object
+	schedulingInterval string
 }
 
-func NewVolSyncReconciler(ctx context.Context, client client.Client, log logr.Logger, owner metav1.Object) *VolSyncReconciler {
+func NewVolSyncReconciler(ctx context.Context, client client.Client, log logr.Logger, owner metav1.Object,
+	schedulingInterval string) *VolSyncReconciler {
 	return &VolSyncReconciler{
-		ctx:    ctx,
-		client: client,
-		log:    log,
-		owner:  owner,
+		ctx:                ctx,
+		client:             client,
+		log:                log,
+		owner:              owner,
+		schedulingInterval: schedulingInterval,
 	}
 }
 
-func (r *VolSyncReconciler) ReconcileRD(rdSpec ramendrv1alpha1.ReplicationDestinationSpec) (*ramendrv1alpha1.ReplicationDestinationInfo, error) {
+func (r *VolSyncReconciler) ReconcileRD(
+	rdSpec ramendrv1alpha1.ReplicationDestinationSpec) (*ramendrv1alpha1.ReplicationDestinationInfo, error) {
+
 	l := r.log.WithValues("rdSpec", rdSpec)
 
 	rd := &volsyncv1alpha1.ReplicationDestination{
@@ -68,9 +75,6 @@ func (r *VolSyncReconciler) ReconcileRD(rdSpec ramendrv1alpha1.ReplicationDestin
 			sshKeys = &rdSpec.SSHKeys
 		}
 
-		//NOT SETTING TRIGGER - since we're using rsync here
-		//rd.Spec.Trigger = &volsyncv1alpha1.ReplicationDestinationTriggerSpec{}
-
 		rd.Spec.Rsync = &volsyncv1alpha1.ReplicationDestinationRsyncSpec{
 			ServiceType: &rsyncServiceType,
 			SSHKeys:     sshKeys,
@@ -85,10 +89,10 @@ func (r *VolSyncReconciler) ReconcileRD(rdSpec ramendrv1alpha1.ReplicationDestin
 
 		return nil
 	})
-
 	if err != nil {
 		return nil, err
 	}
+
 	l.V(1).Info("ReplicationDestination createOrUpdate Complete", "op", op)
 
 	//
@@ -124,8 +128,14 @@ func (r *VolSyncReconciler) ReconcileRS(rsSpec ramendrv1alpha1.ReplicationSource
 
 		rs.Spec.SourcePVC = rsSpec.PVCName
 
-		//TODO: need to figure out how to set trigger (schedule)
-		//rd.Spec.Trigger = &volsyncv1alpha1.ReplicationDestinationTriggerSpec{}
+		cronSpecSchedule, err := ConvertSchedulingIntervalToCronSpec(r.schedulingInterval)
+		if err != nil {
+			l.Error(err, "unable to parse schedulingInterval")
+			return err
+		}
+		rs.Spec.Trigger = &volsyncv1alpha1.ReplicationSourceTriggerSpec{
+			Schedule: cronSpecSchedule,
+		}
 
 		rs.Spec.Rsync = &volsyncv1alpha1.ReplicationSourceRsyncSpec{
 			SSHKeys: &rsSpec.SSHKeys,
@@ -146,4 +156,35 @@ func (r *VolSyncReconciler) ReconcileRS(rsSpec ramendrv1alpha1.ReplicationSource
 
 	l.V(1).Info("ReplicationSource Reconcile Complete")
 	return nil
+}
+
+// Convert from schedulingInterval which is in the format of <num><m,h,d>
+// to the format VolSync expects, which is cronspec: https://en.wikipedia.org/wiki/Cron#Overview
+func ConvertSchedulingIntervalToCronSpec(schedulingInterval string) (*string, error) {
+	// format needs to have at least 1 number and end with m or h or d
+	if len(schedulingInterval) < 2 {
+		return nil, fmt.Errorf("scheduling interval %s is invalid", schedulingInterval)
+	}
+
+	mhd := schedulingInterval[len(schedulingInterval)-1:]
+	mhd = strings.ToLower(mhd) // Make sure we get lowercase m, h or d
+
+	num := schedulingInterval[:len(schedulingInterval)-1]
+
+	var cronSpec string
+
+	switch mhd {
+	case "m":
+		cronSpec = fmt.Sprintf("*/%s * * * *", num)
+	case "h":
+		cronSpec = fmt.Sprintf("* */%s * * *", num)
+	case "d":
+		cronSpec = fmt.Sprintf("* * */%s * *", num)
+	}
+
+	if cronSpec == "" {
+		return nil, fmt.Errorf("scheduling interval %s is invalid. Unable to parse m/h/d", schedulingInterval)
+	}
+
+	return &cronSpec, nil
 }

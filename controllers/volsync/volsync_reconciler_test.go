@@ -22,42 +22,82 @@ const (
 	interval = 250 * time.Millisecond
 )
 
-var _ = Describe("VolsyncReconciler", func() {
-	var ns *corev1.Namespace
+var _ = Describe("VolSyncReconciler - utils", func() {
+	Context("When converting scheduling interval to cronspec for VolSync", func() {
+		It("Should successfully convert an interval specified in minutes", func() {
+			cronSpecSchedule, err := volsync.ConvertSchedulingIntervalToCronSpec("10m")
+			Expect(err).NotTo((HaveOccurred()))
+			Expect(cronSpecSchedule).ToNot(BeNil())
+			Expect(*cronSpecSchedule).To(Equal("*/10 * * * *"))
+		})
+		It("Should successfully convert an interval specified in minutes (case-insensitive)", func() {
+			cronSpecSchedule, err := volsync.ConvertSchedulingIntervalToCronSpec("2M")
+			Expect(err).NotTo((HaveOccurred()))
+			Expect(cronSpecSchedule).ToNot(BeNil())
+			Expect(*cronSpecSchedule).To(Equal("*/2 * * * *"))
+		})
+		It("Should successfully convert an interval specified in hours", func() {
+			cronSpecSchedule, err := volsync.ConvertSchedulingIntervalToCronSpec("31h")
+			Expect(err).NotTo((HaveOccurred()))
+			Expect(cronSpecSchedule).ToNot(BeNil())
+			Expect(*cronSpecSchedule).To(Equal("* */31 * * *"))
+		})
+		It("Should successfully convert an interval specified in days", func() {
+			cronSpecSchedule, err := volsync.ConvertSchedulingIntervalToCronSpec("229d")
+			Expect(err).NotTo((HaveOccurred()))
+			Expect(cronSpecSchedule).ToNot(BeNil())
+			Expect(*cronSpecSchedule).To(Equal("* * */229 * *"))
+		})
+		It("Should fail if interval is invalid (no num)", func() {
+			_, err := volsync.ConvertSchedulingIntervalToCronSpec("d")
+			Expect(err).To((HaveOccurred()))
+		})
+		It("Should fail if interval is invalid (no m/h/d)", func() {
+			_, err := volsync.ConvertSchedulingIntervalToCronSpec("123")
+			Expect(err).To((HaveOccurred()))
+		})
+	})
+})
+
+var _ = Describe("VolSyncReconciler", func() {
+	var testNamespace *corev1.Namespace
 	logger := zap.New(zap.UseDevMode(true), zap.WriteTo(GinkgoWriter))
 
 	var owner metav1.Object
 	var volsyncReconciler *volsync.VolSyncReconciler
 
+	schedulingInterval := "5m"
+	expectedCronSpecSchedule := "*/5 * * * *"
+
 	BeforeEach(func() {
 		// Create namespace for test
-		ns = &corev1.Namespace{
+		testNamespace = &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
 				GenerateName: "vh-",
 			},
 		}
-		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
-		Expect(ns.Name).NotTo(BeEmpty())
+		Expect(k8sClient.Create(ctx, testNamespace)).To(Succeed())
+		Expect(testNamespace.GetName()).NotTo(BeEmpty())
 
 		// Create dummy resource to be the "owner" of the RDs and RSs
 		// Using a configmap for now - in reality this owner resource will
 		// be a DRPC
-		cm := &corev1.ConfigMap{
+		ownerCm := &corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
 				GenerateName: "dummycm-owner-",
-				Namespace:    ns.GetName(),
+				Namespace:    testNamespace.GetName(),
 			},
 		}
-		Expect(k8sClient.Create(ctx, cm)).To(Succeed())
-		Expect(cm.Name).NotTo(BeEmpty())
-		owner = cm
+		Expect(k8sClient.Create(ctx, ownerCm)).To(Succeed())
+		Expect(testNamespace.GetName()).NotTo(BeEmpty())
+		owner = ownerCm
 
-		volsyncReconciler = volsync.NewVolSyncReconciler(ctx, k8sClient, logger, owner)
+		volsyncReconciler = volsync.NewVolSyncReconciler(ctx, k8sClient, logger, owner, schedulingInterval)
 	})
 
 	AfterEach(func() {
 		// All resources are namespaced, so this should clean it all up
-		Expect(k8sClient.Delete(ctx, ns)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, testNamespace)).To(Succeed())
 	})
 
 	Describe("Reconcile ReplicationDestination", func() {
@@ -81,7 +121,8 @@ var _ = Describe("VolsyncReconciler", func() {
 
 				// RD should be created with name=PVCName
 				Eventually(func() error {
-					return k8sClient.Get(ctx, types.NamespacedName{Name: rdSpec.PVCName, Namespace: ns.GetName()}, createdRD)
+					return k8sClient.Get(ctx,
+						types.NamespacedName{Name: rdSpec.PVCName, Namespace: testNamespace.GetName()}, createdRD)
 				}, maxWait, interval).Should(Succeed())
 
 				// Expect the RD should be owned by owner
@@ -93,7 +134,7 @@ var _ = Describe("VolsyncReconciler", func() {
 				Expect(*createdRD.Spec.Rsync.SSHKeys).To(Equal(rdSpec.SSHKeys))
 				Expect(createdRD.Spec.Rsync.Capacity).To(Equal(rdSpec.Capacity))
 				Expect(createdRD.Spec.Rsync.AccessModes).To(Equal([]corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}))
-
+				Expect(createdRD.Spec.Trigger).To(BeNil()) // No schedule should be set
 			})
 
 			Context("When storageClassName is not specified", func() {
@@ -122,7 +163,7 @@ var _ = Describe("VolsyncReconciler", func() {
 						rdPrecreate := &volsyncv1alpha1.ReplicationDestination{
 							ObjectMeta: metav1.ObjectMeta{
 								Name:      rdSpec.PVCName,
-								Namespace: ns.GetName(),
+								Namespace: testNamespace.GetName(),
 							},
 							// Empty spec - will expect the reconcile to fill this out properly for us (i.e. update)
 							Spec: volsyncv1alpha1.ReplicationDestinationSpec{},
@@ -145,8 +186,8 @@ var _ = Describe("VolsyncReconciler", func() {
 						}
 						Expect(k8sClient.Status().Update(ctx, rdPrecreate)).To(Succeed())
 						Eventually(func() *string {
-							_ = k8sClient.Get(ctx, client.ObjectKeyFromObject(rdPrecreate), rdPrecreate)
-							if rdPrecreate.Status == nil || rdPrecreate.Status.Rsync == nil {
+							err := k8sClient.Get(ctx, client.ObjectKeyFromObject(rdPrecreate), rdPrecreate)
+							if err != nil || rdPrecreate.Status == nil || rdPrecreate.Status.Rsync == nil {
 								return nil
 							}
 							return rdPrecreate.Status.Rsync.Address
@@ -182,7 +223,8 @@ var _ = Describe("VolsyncReconciler", func() {
 
 				// RS should be created with name=PVCName
 				Eventually(func() error {
-					return k8sClient.Get(ctx, types.NamespacedName{Name: rsSpec.PVCName, Namespace: ns.GetName()}, createdRS)
+					return k8sClient.Get(ctx,
+						types.NamespacedName{Name: rsSpec.PVCName, Namespace: testNamespace.GetName()}, createdRS)
 				}, maxWait, interval).Should(Succeed())
 
 				// Expect the RS should be owned by owner
@@ -194,7 +236,10 @@ var _ = Describe("VolsyncReconciler", func() {
 				Expect(*createdRS.Spec.Rsync.SSHKeys).To(Equal(rsSpec.SSHKeys))
 				Expect(*createdRS.Spec.Rsync.Address).To(Equal(rsSpec.Address))
 
-				//TODO: will need to ensure that trigger (i.e. schedule) is set properly on the ReplicationSource
+				Expect(createdRS.Spec.Trigger).ToNot(BeNil())
+				Expect(createdRS.Spec.Trigger).To(Equal(&volsyncv1alpha1.ReplicationSourceTriggerSpec{
+					Schedule: &expectedCronSpecSchedule,
+				}))
 			})
 
 			It("Should create an ReplicationSource if one does not exist", func() {
@@ -207,7 +252,7 @@ var _ = Describe("VolsyncReconciler", func() {
 					rsPrecreate := &volsyncv1alpha1.ReplicationSource{
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      rsSpec.PVCName,
-							Namespace: ns.GetName(),
+							Namespace: testNamespace.GetName(),
 						},
 						// Will expect the reconcile to fill this out properly for us (i.e. update)
 						Spec: volsyncv1alpha1.ReplicationSourceSpec{
@@ -238,5 +283,6 @@ func ownerMatches(obj metav1.Object, ownerName, ownerKind string) bool {
 			return true
 		}
 	}
+
 	return false
 }
