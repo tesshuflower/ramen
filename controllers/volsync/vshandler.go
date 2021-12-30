@@ -86,13 +86,15 @@ func (r *VSHandler) ReconcileRD(
 			sshKeys = &rdSpec.SSHKeys
 		}
 
+		//TODO: VolumeSnapshotClassName
+
 		rd.Spec.Rsync = &volsyncv1alpha1.ReplicationDestinationRsyncSpec{
 			ServiceType: &rsyncServiceType,
 			SSHKeys:     sshKeys,
 
 			ReplicationDestinationVolumeOptions: volsyncv1alpha1.ReplicationDestinationVolumeOptions{
 				CopyMethod:       volsyncv1alpha1.CopyMethodSnapshot,
-				Capacity:         rdSpec.Capacity,
+				Capacity:         rdSpec.Resources.Requests.Storage(),
 				StorageClassName: rdSpec.StorageClassName,
 				AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 			},
@@ -147,6 +149,8 @@ func (r *VSHandler) ReconcileRS(rsSpec ramendrv1alpha1.ReplicationSourceSpec) er
 		rs.Spec.Trigger = &volsyncv1alpha1.ReplicationSourceTriggerSpec{
 			Schedule: cronSpecSchedule,
 		}
+
+		//TODO: VolumeSnapshotClassName
 
 		rs.Spec.Rsync = &volsyncv1alpha1.ReplicationSourceRsyncSpec{
 			SSHKeys: &rsSpec.SSHKeys,
@@ -231,25 +235,28 @@ func (r *VSHandler) ensurePVCFromSnapshot(rdSpec ramendrv1alpha1.ReplicationDest
 			return err
 		}
 
+		//TODO: needs finalizer?  r.addFinalizer(pvc, pvcFinalizerName)
+
 		if pvc.Status.Phase == corev1.ClaimBound {
 			// Assume no changes are required
 			l.V(1).Info("PVC already bound")
 			return nil
 		}
 
-		//TODO: needs finalizer?  r.addFinalizer(pvc, pvcFinalizerName)
+		accessModes := []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce} // Default value
+		if len(rdSpec.AccessModes) > 0 {
+			accessModes = rdSpec.AccessModes
+		}
 
 		if pvc.CreationTimestamp.IsZero() { // set immutable fields
-			pvc.Spec.AccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce} //TODO: should this come from original PVC i.e. in RDspec?
+			pvc.Spec.AccessModes = accessModes
 			pvc.Spec.StorageClassName = rdSpec.StorageClassName
 
-			// Don't change datasource - only set when initially creating
+			// Only set when initially creating
 			pvc.Spec.DataSource = &snapshotRef
 		}
 
-		pvc.Spec.Resources.Requests = corev1.ResourceList{
-			corev1.ResourceStorage: *rdSpec.Capacity,
-		}
+		pvc.Spec.Resources = rdSpec.Resources
 
 		return nil
 	})

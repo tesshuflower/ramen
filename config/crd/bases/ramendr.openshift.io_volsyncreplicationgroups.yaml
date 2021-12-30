@@ -88,25 +88,47 @@ spec:
               rdSpec:
                 items:
                   properties:
-                    capacity:
-                      anyOf:
-                      - type: integer
-                      - type: string
-                      description: capacity is the size of the destination volume
-                        to create.
-                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                      x-kubernetes-int-or-string: true
+                    accessModes:
+                      description: AccessModes set in the claim to be replicated
+                      items:
+                        type: string
+                      type: array
                     pvcName:
+                      description: Name of the PVC resource
                       type: string
+                    resources:
+                      description: Resources set in the claim to be replicated
+                      properties:
+                        limits:
+                          additionalProperties:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          description: 'Limits describes the maximum amount of compute
+                            resources allowed. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
+                          type: object
+                        requests:
+                          additionalProperties:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          description: 'Requests describes the minimum amount of compute
+                            resources required. If Requests is omitted for a container,
+                            it defaults to Limits if that is explicitly specified,
+                            otherwise to an implementation-defined value. More info:
+                            https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
+                          type: object
+                      type: object
                     sshKeys:
                       type: string
                     storageClassName:
-                      description: storageClassName can be used to specify the StorageClass
-                        of the destination volume. If not set, the default StorageClass
-                        will be used.
+                      description: Name of the StorageClass required by the claim.
                       type: string
                   required:
-                  - capacity
                   - pvcName
                   type: object
                 type: array
@@ -291,22 +313,46 @@ spec:
                 description: All the protected pvcs
                 items:
                   properties:
-                    capacity:
-                      anyOf:
-                      - type: integer
-                      - type: string
-                      description: Represents the actual resources of the underlying
-                        volume.
-                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                      x-kubernetes-int-or-string: true
-                    name:
+                    accessModes:
+                      description: AccessModes set in the claim to be replicated
+                      items:
+                        type: string
+                      type: array
+                    pvcName:
                       description: Name of the PVC resource
                       type: string
+                    resources:
+                      description: Resources set in the claim to be replicated
+                      properties:
+                        limits:
+                          additionalProperties:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          description: 'Limits describes the maximum amount of compute
+                            resources allowed. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
+                          type: object
+                        requests:
+                          additionalProperties:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          description: 'Requests describes the minimum amount of compute
+                            resources required. If Requests is omitted for a container,
+                            it defaults to Limits if that is explicitly specified,
+                            otherwise to an implementation-defined value. More info:
+                            https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
+                          type: object
+                      type: object
                     storageClassName:
                       description: Name of the StorageClass required by the claim.
                       type: string
                   required:
-                  - name
+                  - pvcName
                   type: object
                 type: array
             type: object

@@ -107,9 +107,15 @@ var _ = Describe("VolSync Handler", func() {
 			capacity := resource.MustParse("2Gi")
 
 			rdSpec := ramendrv1alpha1.ReplicationDestinationSpec{
-				PVCName:  "mytestpvc",
-				SSHKeys:  "testkey123",
-				Capacity: &capacity,
+				VolSyncPVCInfo: ramendrv1alpha1.VolSyncPVCInfo{
+					PVCName: "mytestpvc",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceStorage: capacity,
+						},
+					},
+				},
+				SSHKeys: "testkey123",
 			}
 
 			var returnedRDInfo *ramendrv1alpha1.ReplicationDestinationInfo
@@ -134,7 +140,7 @@ var _ = Describe("VolSync Handler", func() {
 				Expect(*createdRD.Spec.Rsync.ServiceType).To(Equal(corev1.ServiceTypeLoadBalancer))
 				Expect(createdRD.Spec.Rsync.CopyMethod).To(Equal(volsyncv1alpha1.CopyMethodSnapshot))
 				Expect(*createdRD.Spec.Rsync.SSHKeys).To(Equal(rdSpec.SSHKeys))
-				Expect(createdRD.Spec.Rsync.Capacity).To(Equal(rdSpec.Capacity))
+				Expect(*createdRD.Spec.Rsync.Capacity).To(Equal(capacity))
 				Expect(createdRD.Spec.Rsync.AccessModes).To(Equal([]corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}))
 				Expect(createdRD.Spec.Trigger).To(BeNil()) // No schedule should be set
 			})
@@ -284,10 +290,16 @@ var _ = Describe("VolSync Handler", func() {
 		pvcStorageClassName := "teststorageclass"
 
 		rdSpec := ramendrv1alpha1.ReplicationDestinationSpec{
-			PVCName:          pvcName,
-			SSHKeys:          "testsecret",
-			Capacity:         &pvcCapacity,
-			StorageClassName: &pvcStorageClassName,
+			VolSyncPVCInfo: ramendrv1alpha1.VolSyncPVCInfo{
+				PVCName:          pvcName,
+				StorageClassName: &pvcStorageClassName,
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceStorage: pvcCapacity,
+					},
+				},
+			},
+			SSHKeys: "testsecret",
 		}
 
 		var ensurePVCErr error

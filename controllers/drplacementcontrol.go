@@ -222,9 +222,8 @@ func (d *DRPCInstance) updateDestinationVSRG(clusterName string, srcVSRG *rmn.Vo
 	dstVSRG.Spec.RDSpec = nil
 	for _, volSyncPVC := range srcVSRG.Status.VolSyncPVCs {
 		rdSpec := rmn.ReplicationDestinationSpec{
-			PVCName:          volSyncPVC.Name,
-			Capacity:         volSyncPVC.Capacity,
-			StorageClassName: volSyncPVC.StorageClassName,
+			VolSyncPVCInfo: volSyncPVC,
+			//TODO: SSHKeys
 		}
 
 		dstVSRG.Spec.RDSpec = append(dstVSRG.Spec.RDSpec, rdSpec)

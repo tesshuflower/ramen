@@ -570,8 +570,13 @@ func (v *VSRGInstance) updateInstanceStatus() {
 		if pvc.Status.Phase == corev1.ClaimBound {
 			volSyncPVC := v.findProtectedPVC(pvc.Name)
 			if volSyncPVC == nil {
-				volSyncPVC := &ramendrv1alpha1.VolSyncPVCInfo{Name: pvc.Name,
-					Capacity: pvc.Status.Capacity.Storage(), StorageClassName: pvc.Spec.StorageClassName}
+				volSyncPVC := &ramendrv1alpha1.VolSyncPVCInfo{
+					PVCName:          pvc.Name,
+					StorageClassName: pvc.Spec.StorageClassName,
+					AccessModes:      pvc.Spec.AccessModes,
+					Resources:        pvc.Spec.Resources,
+				}
+
 				v.instance.Status.VolSyncPVCs = append(v.instance.Status.VolSyncPVCs, *volSyncPVC)
 				updateNeeded = true
 			}
@@ -592,7 +597,7 @@ func (v *VSRGInstance) updateInstanceStatus() {
 func (v *VSRGInstance) findProtectedPVC(pvcName string) *ramendrv1alpha1.VolSyncPVCInfo {
 	for index := range v.instance.Status.VolSyncPVCs {
 		protectedPVC := &v.instance.Status.VolSyncPVCs[index]
-		if protectedPVC.Name == pvcName {
+		if protectedPVC.PVCName == pvcName {
 			return protectedPVC
 		}
 	}

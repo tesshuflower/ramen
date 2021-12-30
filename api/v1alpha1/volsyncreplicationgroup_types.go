@@ -17,7 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
-	"k8s.io/apimachinery/pkg/api/resource"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -25,14 +25,8 @@ import (
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
 type ReplicationDestinationSpec struct {
-	PVCName string `json:"pvcName"`
-	SSHKeys string `json:"sshKeys,omitempty"`
-	// capacity is the size of the destination volume to create.
-	Capacity *resource.Quantity `json:"capacity"`
-	// storageClassName can be used to specify the StorageClass of the
-	// destination volume. If not set, the default StorageClass will be used.
-	//+optional
-	StorageClassName *string `json:"storageClassName,omitempty"`
+	VolSyncPVCInfo `json:",inline"`
+	SSHKeys        string `json:"sshKeys,omitempty"`
 }
 
 type ReplicationDestinationInfo struct {
@@ -76,13 +70,16 @@ type VolSyncReplicationGroupSpec struct {
 
 type VolSyncPVCInfo struct {
 	// Name of the PVC resource
-	Name string `json:"name"`
-
-	// Represents the actual resources of the underlying volume.
-	Capacity *resource.Quantity `json:"capacity,omitempty"`
+	PVCName string `json:"pvcName"`
 
 	// Name of the StorageClass required by the claim.
 	StorageClassName *string `json:"storageClassName,omitempty"`
+
+	// AccessModes set in the claim to be replicated
+	AccessModes []corev1.PersistentVolumeAccessMode `json:"accessModes,omitempty"`
+
+	// Resources set in the claim to be replicated
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 }
 
 // VolSyncReplicationGroupStatus defines the observed state of VolSyncReplicationGroup
