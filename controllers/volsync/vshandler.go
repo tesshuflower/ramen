@@ -40,6 +40,8 @@ const (
 	VolumeSnapshotGroup                string = "snapshot.storage.k8s.io"
 	VolumeSnapshotVersion              string = "v1"
 	VolumeSnapshotProtectFinalizerName string = "volsyncreplicationgroups.ramendr.openshift.io/volumesnapshot-protection"
+	VSRGReplicationSourceLabel         string = "volsyncreplicationgroup-owner"
+	FinalSyncTriggerString             string = "vsrg-final-sync"
 )
 
 type VSHandler struct {
@@ -61,23 +63,25 @@ func NewVSHandler(ctx context.Context, client client.Client, log logr.Logger, ow
 	}
 }
 
-func (r *VSHandler) ReconcileRD(
+func (v *VSHandler) ReconcileRD(
 	rdSpec ramendrv1alpha1.ReplicationDestinationSpec) (*ramendrv1alpha1.ReplicationDestinationInfo, error) {
 
-	l := r.log.WithValues("rdSpec", rdSpec)
+	l := v.log.WithValues("rdSpec", rdSpec)
 
 	rd := &volsyncv1alpha1.ReplicationDestination{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      rdSpec.PVCName, // Use PVC name as name of ReplicationDestination
-			Namespace: r.owner.GetNamespace(),
+			Name:      getReplicationDestinationName(rdSpec),
+			Namespace: v.owner.GetNamespace(),
 		},
 	}
 
-	op, err := ctrlutil.CreateOrUpdate(r.ctx, r.client, rd, func() error {
-		if err := ctrl.SetControllerReference(r.owner, rd, r.client.Scheme()); err != nil {
+	op, err := ctrlutil.CreateOrUpdate(v.ctx, v.client, rd, func() error {
+		if err := ctrl.SetControllerReference(v.owner, rd, v.client.Scheme()); err != nil {
 			l.Error(err, "unable to set controller reference")
 			return err
 		}
+
+		addVSRGOwnerLabel(v.owner, rd)
 
 		// Pre-alloacated shared secret
 		var sshKeys *string
@@ -123,31 +127,45 @@ func (r *VSHandler) ReconcileRD(
 	}, nil
 }
 
-func (r *VSHandler) ReconcileRS(rsSpec ramendrv1alpha1.ReplicationSourceSpec) error {
-	l := r.log.WithValues("rsSpec", rsSpec)
+// Returns true only if runFinalSynchronization was true and the final sync is done
+func (v *VSHandler) ReconcileRS(
+	rsSpec ramendrv1alpha1.ReplicationSourceSpec, runFinalSynchronization bool) (bool, error) {
+	l := v.log.WithValues("rsSpec", rsSpec)
 
 	rs := &volsyncv1alpha1.ReplicationSource{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      rsSpec.PVCName, // Use PVC name as name of ReplicationSource
-			Namespace: r.owner.GetNamespace(),
+			Name:      getReplicationSourceName(rsSpec),
+			Namespace: v.owner.GetNamespace(),
 		},
 	}
 
-	op, err := ctrlutil.CreateOrUpdate(r.ctx, r.client, rs, func() error {
-		if err := ctrl.SetControllerReference(r.owner, rs, r.client.Scheme()); err != nil {
+	op, err := ctrlutil.CreateOrUpdate(v.ctx, v.client, rs, func() error {
+		if err := ctrl.SetControllerReference(v.owner, rs, v.client.Scheme()); err != nil {
 			l.Error(err, "unable to set controller reference")
 			return err
 		}
 
+		addVSRGOwnerLabel(v.owner, rs)
+
 		rs.Spec.SourcePVC = rsSpec.PVCName
 
-		cronSpecSchedule, err := ConvertSchedulingIntervalToCronSpec(r.schedulingInterval)
-		if err != nil {
-			l.Error(err, "unable to parse schedulingInterval")
-			return err
-		}
-		rs.Spec.Trigger = &volsyncv1alpha1.ReplicationSourceTriggerSpec{
-			Schedule: cronSpecSchedule,
+		if runFinalSynchronization {
+			l.V(1).Info("ReplicationSource - final sync")
+			// Change the schedule to instead use a keyword trigger - to trigger
+			// a final sync to happen
+			rs.Spec.Trigger = &volsyncv1alpha1.ReplicationSourceTriggerSpec{
+				Manual: FinalSyncTriggerString,
+			}
+		} else {
+			// Set schedule
+			cronSpecSchedule, err := ConvertSchedulingIntervalToCronSpec(v.schedulingInterval)
+			if err != nil {
+				l.Error(err, "unable to parse schedulingInterval")
+				return err
+			}
+			rs.Spec.Trigger = &volsyncv1alpha1.ReplicationSourceTriggerSpec{
+				Schedule: cronSpecSchedule,
+			}
 		}
 
 		//TODO: VolumeSnapshotClassName
@@ -166,19 +184,121 @@ func (r *VSHandler) ReconcileRS(rsSpec ramendrv1alpha1.ReplicationSourceSpec) er
 
 	l.V(1).Info("ReplicationSource createOrUpdate Complete", "op", op)
 	if err != nil {
-		return err
+		return false, err
+	}
+
+	//
+	// For final sync only - check status to make sure the final sync is complete
+	//
+	if runFinalSynchronization {
+		if rs.Status == nil || rs.Status.LastManualSync != FinalSyncTriggerString {
+			l.V(1).Info("ReplicationSource running final sync - waiting for status to mark completion ...")
+			return false, nil
+		}
+		l.V(1).Info("ReplicationSource final sync comple")
+		return true, nil
 	}
 
 	l.V(1).Info("ReplicationSource Reconcile Complete")
+	return false, nil
+}
+
+func (v *VSHandler) CleanupRSNotInSpecList(rsSpecList []ramendrv1alpha1.ReplicationSourceSpec) error {
+	// Remove any ReplicationSource owned (by parent vsrg owner) that is not in the provided rsSpecList
+	currentRSListByOwner, err := v.listRSByOwner()
+	if err != nil {
+		return err
+	}
+	for _, rs := range currentRSListByOwner.Items {
+		foundInSpecList := false
+		for _, rsSpec := range rsSpecList {
+			if rs.GetName() == getReplicationSourceName(rsSpec) {
+				foundInSpecList = true
+				break
+			}
+		}
+		if !foundInSpecList {
+			// Delete the ReplicationSource, log errors with cleanup but continue on
+			if err := v.client.Delete(v.ctx, &rs); err != nil {
+				v.log.Error(err, "Error cleaning up ReplicationSource", "name", rs.GetName())
+			} else {
+				v.log.Info("Deleted ReplicationSource", "name", rs.GetName())
+			}
+		}
+	}
+
 	return nil
 }
 
-func (r *VSHandler) EnsurePVCfromRD(rdSpec ramendrv1alpha1.ReplicationDestinationSpec) error {
-	l := r.log.WithValues("rdSpec", rdSpec)
+func (v *VSHandler) CleanupRDNotInSpecList(rdSpecList []ramendrv1alpha1.ReplicationDestinationSpec) error {
+	// Remove any ReplicationDestination owned (by parent vsrg owner) that is not in the provided rdSpecList
+	currentRDListByOwner, err := v.listRDByOwner()
+	if err != nil {
+		return err
+	}
+	for _, rd := range currentRDListByOwner.Items {
+		foundInSpecList := false
+		for _, rdSpec := range rdSpecList {
+			if rd.GetName() == getReplicationDestinationName(rdSpec) {
+				foundInSpecList = true
+				break
+			}
+		}
+		if !foundInSpecList {
+			// Delete the ReplicationDestination, log errors with cleanup but continue on
+			if err := v.client.Delete(v.ctx, &rd); err != nil {
+				v.log.Error(err, "Error cleaning up ReplicationDestination", "name", rd.GetName())
+			} else {
+				v.log.Info("Deleted ReplicationDestination", "name", rd.GetName())
+			}
+		}
+	}
+
+	return nil
+}
+
+func (v *VSHandler) listRSByOwner() (volsyncv1alpha1.ReplicationSourceList, error) {
+	rsList := volsyncv1alpha1.ReplicationSourceList{}
+	if err := v.listByOwner(&rsList); err != nil {
+		v.log.Error(err, "Failed to list ReplicationSources for VSRG", "vsrg name", v.owner.GetName())
+		return rsList, err
+	}
+	return rsList, nil
+}
+
+func (v *VSHandler) listRDByOwner() (volsyncv1alpha1.ReplicationDestinationList, error) {
+	rdList := volsyncv1alpha1.ReplicationDestinationList{}
+	if err := v.listByOwner(&rdList); err != nil {
+		v.log.Error(err, "Failed to list ReplicationDestinations for VSRG", "vsrg name", v.owner.GetName())
+		return rdList, err
+	}
+	return rdList, nil
+}
+
+// Lists only RS/RD with VSRGReplicationSourceLabel that matches the owner
+func (v *VSHandler) listByOwner(list client.ObjectList) error {
+	matchLabels := map[string]string{
+		VSRGReplicationSourceLabel: v.owner.GetName(),
+	}
+	listOptions := []client.ListOption{
+		client.InNamespace(v.owner.GetNamespace()),
+		client.MatchingLabels(matchLabels),
+	}
+
+	if err := v.client.List(v.ctx, list, listOptions...); err != nil {
+		v.log.Error(err, "Failed to list by label", "matchLabels", matchLabels)
+		return err
+	}
+
+	return nil
+}
+
+func (v *VSHandler) EnsurePVCfromRD(rdSpec ramendrv1alpha1.ReplicationDestinationSpec) error {
+	l := v.log.WithValues("rdSpec", rdSpec)
 
 	// Get RD instance
 	rdInst := &volsyncv1alpha1.ReplicationDestination{}
-	err := r.client.Get(r.ctx, types.NamespacedName{Name: rdSpec.PVCName, Namespace: r.owner.GetNamespace()}, rdInst)
+	err := v.client.Get(v.ctx, types.NamespacedName{Name: rdSpec.PVCName, Namespace: v.owner.GetNamespace()}, rdInst)
 	if err != nil {
 		if !kerrors.IsNotFound(err) {
 			l.Error(err, "Failed to get ReplicationDestination")
@@ -207,31 +327,27 @@ func (r *VSHandler) EnsurePVCfromRD(rdSpec ramendrv1alpha1.ReplicationDestinatio
 	}
 	l.V(1).Info("Latest Image for ReplicationDestination", "latestImage	", vsImageRef)
 
-	if err := r.validateSnapshotAndAddFinalizer(*vsImageRef); err != nil {
+	if err := v.validateSnapshotAndAddFinalizer(*vsImageRef); err != nil {
 		return err
 	}
 
-	if err := r.ensurePVCFromSnapshot(rdSpec, *vsImageRef); err != nil {
-		return err
-	}
-
-	return nil
+	return v.ensurePVCFromSnapshot(rdSpec, *vsImageRef)
 }
 
-func (r *VSHandler) ensurePVCFromSnapshot(rdSpec ramendrv1alpha1.ReplicationDestinationSpec,
+func (v *VSHandler) ensurePVCFromSnapshot(rdSpec ramendrv1alpha1.ReplicationDestinationSpec,
 	snapshotRef corev1.TypedLocalObjectReference) error {
-	l := r.log.WithValues("pvcName", rdSpec.PVCName, "snapshotRef", snapshotRef)
+	l := v.log.WithValues("pvcName", rdSpec.PVCName, "snapshotRef", snapshotRef)
 
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      rdSpec.PVCName,
-			Namespace: r.owner.GetNamespace(),
+			Namespace: v.owner.GetNamespace(),
 		},
 	}
 
-	op, err := ctrlutil.CreateOrUpdate(r.ctx, r.client, pvc, func() error {
-		if err := ctrl.SetControllerReference(r.owner, pvc, r.client.Scheme()); err != nil {
-			r.log.Error(err, "unable to set controller reference")
+	op, err := ctrlutil.CreateOrUpdate(v.ctx, v.client, pvc, func() error {
+		if err := ctrl.SetControllerReference(v.owner, pvc, v.client.Scheme()); err != nil {
+			v.log.Error(err, "unable to set controller reference")
 			return err
 		}
 
@@ -270,7 +386,7 @@ func (r *VSHandler) ensurePVCFromSnapshot(rdSpec ramendrv1alpha1.ReplicationDest
 	return nil
 }
 
-func (r *VSHandler) validateSnapshotAndAddFinalizer(volumeSnapshotRef corev1.TypedLocalObjectReference) error {
+func (v *VSHandler) validateSnapshotAndAddFinalizer(volumeSnapshotRef corev1.TypedLocalObjectReference) error {
 	// Using unstructured to avoid needing to require VolumeSnapshot in client scheme
 	volSnap := &unstructured.Unstructured{}
 	volSnap.SetGroupVersionKind(schema.GroupVersionKind{
@@ -278,26 +394,26 @@ func (r *VSHandler) validateSnapshotAndAddFinalizer(volumeSnapshotRef corev1.Typ
 		Kind:    volumeSnapshotRef.Kind,
 		Version: VolumeSnapshotVersion,
 	})
-	err := r.client.Get(r.ctx, types.NamespacedName{
+	err := v.client.Get(v.ctx, types.NamespacedName{
 		Name:      volumeSnapshotRef.Name,
-		Namespace: r.owner.GetNamespace(),
+		Namespace: v.owner.GetNamespace(),
 	}, volSnap)
 
 	if err != nil {
-		r.log.Error(err, "Unable to get VolumeSnapshot", "volumeSnapshotRef", volumeSnapshotRef)
+		v.log.Error(err, "Unable to get VolumeSnapshot", "volumeSnapshotRef", volumeSnapshotRef)
 		return err
 	}
 
-	if err := r.addFinalizerAndUpdate(volSnap, VolumeSnapshotProtectFinalizerName); err != nil {
-		r.log.Error(err, "Unable to add finalizer to VolumeSnapshot", "volumeSnapshotRef", volumeSnapshotRef)
+	if err := v.addFinalizerAndUpdate(volSnap, VolumeSnapshotProtectFinalizerName); err != nil {
+		v.log.Error(err, "Unable to add finalizer to VolumeSnapshot", "volumeSnapshotRef", volumeSnapshotRef)
 		return err
 	}
 
-	r.log.V(1).Info("VolumeSnapshot validated and protected with finalizer", "volumeSnapshotRef", volumeSnapshotRef)
+	v.log.V(1).Info("VolumeSnapshot validated and protected with finalizer", "volumeSnapshotRef", volumeSnapshotRef)
 	return nil
 }
 
-func (r *VSHandler) addFinalizer(obj client.Object, finalizer string) (updated bool) {
+func (v *VSHandler) addFinalizer(obj client.Object, finalizer string) (updated bool) {
 	updated = false
 	if !ctrlutil.ContainsFinalizer(obj, finalizer) {
 		ctrlutil.AddFinalizer(obj, finalizer)
@@ -306,10 +422,10 @@ func (r *VSHandler) addFinalizer(obj client.Object, finalizer string) (updated b
 	return updated
 }
 
-func (r *VSHandler) addFinalizerAndUpdate(obj client.Object, finalizer string) error {
-	if r.addFinalizer(obj, finalizer) {
-		if err := r.client.Update(r.ctx, obj); err != nil {
-			r.log.Error(err, "Failed to add finalizer", "finalizer", finalizer)
+func (v *VSHandler) addFinalizerAndUpdate(obj client.Object, finalizer string) error {
+	if v.addFinalizer(obj, finalizer) {
+		if err := v.client.Update(v.ctx, obj); err != nil {
+			v.log.Error(err, "Failed to add finalizer", "finalizer", finalizer)
 			return fmt.Errorf("%w", err)
 		}
 	}
@@ -345,4 +461,21 @@ func ConvertSchedulingIntervalToCronSpec(schedulingInterval string) (*string, er
 	}
 
 	return &cronSpec, nil
+}
+
+func addVSRGOwnerLabel(owner, obj metav1.Object) {
+	// Set vsrg label to owner name - enables lookups by owner label
+	labels := obj.GetLabels()
+	if labels == nil {
+		labels = make(map[string]string)
+	}
+	labels[VSRGReplicationSourceLabel] = owner.GetName()
+	obj.SetLabels(labels)
+}
+
+func getReplicationDestinationName(rdSpec ramendrv1alpha1.ReplicationDestinationSpec) string {
+	return rdSpec.PVCName // Use PVC name as name of ReplicationDestination
+}
+func getReplicationSourceName(rsSpec ramendrv1alpha1.ReplicationSourceSpec) string {
+	return rsSpec.PVCName // Use PVC name as name of ReplicationSource
 }

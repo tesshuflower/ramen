@@ -36,6 +36,7 @@ import (
 	ctrlcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
@@ -47,7 +48,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
-const vsrgFinalizerName = "volumereplicationgroups.ramendr.openshift.io/vsrg-protection"
+const VsrgFinalizerName = "volumereplicationgroups.ramendr.openshift.io/vsrg-protection"
 
 // VolSyncReplicationGroupReconciler reconciles a VolSyncReplicationGroup object
 type VolSyncReplicationGroupReconciler struct {
@@ -71,7 +72,7 @@ func (r *VolSyncReplicationGroupReconciler) SetupWithManager(mgr ctrl.Manager) e
 			return []reconcile.Request{}
 		}
 
-		return filterPVC(mgr, pvc,
+		return filterPVCForVolSync(mgr, pvc,
 			log.WithValues("pvc", types.NamespacedName{Name: pvc.Name, Namespace: pvc.Namespace}))
 	}))
 
@@ -102,14 +103,14 @@ func pvcPredicateFuncFoVolSync() predicate.Funcs {
 	pvcPredicate := predicate.Funcs{
 		// NOTE: Create predicate is retained, to help with logging the event
 		CreateFunc: func(e event.CreateEvent) bool {
-			log := ctrl.Log.WithName("pvcmap").WithName("VolumeReplicationGroup")
+			log := ctrl.Log.WithName("pvcmap").WithName("VolSyncReplicationGroup")
 
 			log.Info("Create event for PersistentVolumeClaim")
 
 			return true
 		},
 		UpdateFunc: func(e event.UpdateEvent) bool {
-			log := ctrl.Log.WithName("pvcmap").WithName("VolumeReplicationGroup")
+			log := ctrl.Log.WithName("pvcmap").WithName("VolSyncReplicationGroup")
 			oldPVC, ok := e.ObjectOld.DeepCopyObject().(*corev1.PersistentVolumeClaim)
 			if !ok {
 				log.Info("Failed to deep copy older PersistentVolumeClaim")
@@ -167,6 +168,51 @@ func updateEventDecisionForVolSync(oldPVC *corev1.PersistentVolumeClaim,
 		"newPVC phase", newPVC.Status.Phase)
 
 	return !requeue
+}
+
+func filterPVCForVolSync(mgr manager.Manager, pvc *corev1.PersistentVolumeClaim, log logr.Logger) []reconcile.Request {
+	req := []reconcile.Request{}
+
+	var vsrgs ramendrv1alpha1.VolSyncReplicationGroupList
+
+	listOptions := []client.ListOption{
+		client.InNamespace(pvc.Namespace),
+	}
+
+	// decide if reconcile request needs to be sent to the
+	// corresponding VolSyncReplicationGroup CR by:
+	// - whether there is a VolSyncReplicationGroup CR in the namespace
+	//   to which the the pvc belongs to.
+	// - whether the labels on pvc match the label selectors from
+	//    VolSyncReplicationGroup CR.
+	err := mgr.GetClient().List(context.TODO(), &vsrgs, listOptions...)
+	if err != nil {
+		log.Error(err, "Failed to get list of VolSyncReplicationGroup resources")
+
+		return []reconcile.Request{}
+	}
+
+	for _, vsrg := range vsrgs.Items {
+		vsrgLabelSelector := vsrg.Spec.PVCSelector
+		selector, err := metav1.LabelSelectorAsSelector(&vsrgLabelSelector)
+		// continue if we fail to get the labels for this object hoping
+		// that pvc might actually belong to  some other vrg instead of
+		// this. If not found, then reconcile request would not be sent
+		if err != nil {
+			log.Error(err, "Failed to get the label selector from VolSyncReplicationGroup", "vsrgName", vsrg.Name)
+
+			continue
+		}
+
+		if selector.Matches(labels.Set(pvc.GetLabels())) {
+			log.Info("Found VolSyncReplicationGroup with matching labels",
+				"vsrg", vsrg.Name, "labeled", selector)
+
+			req = append(req, reconcile.Request{NamespacedName: types.NamespacedName{Name: vsrg.Name, Namespace: vsrg.Namespace}})
+		}
+	}
+
+	return req
 }
 
 //+kubebuilder:rbac:groups=ramendr.openshift.io,resources=volsyncreplicationgroups,verbs=get;list;watch;create;update;patch;delete
@@ -409,14 +455,14 @@ func (v *VSRGInstance) processForDeletion() (ctrl.Result, error) {
 
 	defer v.log.Info("Exiting processing VolSyncReplicationGroup")
 
-	if !containsString(v.instance.ObjectMeta.Finalizers, vsrgFinalizerName) {
-		v.log.Info("Finalizer missing from resource", "finalizer", vsrgFinalizerName)
+	if !containsString(v.instance.ObjectMeta.Finalizers, VsrgFinalizerName) {
+		v.log.Info("Finalizer missing from resource", "finalizer", VsrgFinalizerName)
 
 		return ctrl.Result{}, nil
 	}
 
-	if err := v.removeFinalizer(vsrgFinalizerName); err != nil {
-		v.log.Info("Failed to remove finalizer", "finalizer", vsrgFinalizerName, "errorValue", err)
+	if err := v.removeFinalizer(VsrgFinalizerName); err != nil {
+		v.log.Info("Failed to remove finalizer", "finalizer", VsrgFinalizerName, "errorValue", err)
 
 		return ctrl.Result{Requeue: true}, nil
 	}
@@ -442,8 +488,8 @@ func (v *VSRGInstance) processAsPrimary() (ctrl.Result, error) {
 	defer v.log.Info("Exiting processing VolSyncReplicationGroup")
 
 	//TODO: this is done for processAsSecondary too - move to processVolSync() (parent func)
-	if err := v.addFinalizer(vsrgFinalizerName); err != nil {
-		v.log.Error(err, "Failed to add finalizer", "finalizer", vsrgFinalizerName)
+	if err := v.addFinalizer(VsrgFinalizerName); err != nil {
+		v.log.Error(err, "Failed to add finalizer", "finalizer", VsrgFinalizerName)
 
 		msg := "Failed to add finalizer to VolSyncReplicationGroup"
 		setVRGDataErrorCondition(&v.instance.Status.Conditions, v.instance.Generation, msg)
@@ -549,14 +595,22 @@ func (v *VSRGInstance) reconcileVolSyncAsPrimary() error {
 		v.updateInstanceStatus()
 	}
 
-	// Reconcile RSSpec (deletion or replication)
+	// Reconcile RSSpec
 	for _, rsSpec := range v.instance.Spec.RSSpec {
-		err := v.volSyncHandler.ReconcileRS(rsSpec)
+		_, err := v.volSyncHandler.ReconcileRS(rsSpec, false /* Schedule sync normally */)
 		if err != nil {
 			return err
 		}
 	}
-	//TODO: cleanup any RS that is not in rsSpec
+
+	//TODO: cleanup any RS that is not in rsSpec?
+
+	// Cleanup - this VSRG is primary, cleanup if necessary
+	// remove ReplicationDestinations that would have been created when this VSRG was
+	// secondary if they are not in the RDSpec list
+	if err := v.volSyncHandler.CleanupRDNotInSpecList(v.instance.Spec.RDSpec); err != nil {
+		return err
+	}
 
 	v.log.Info("Successfully reconciled VolSync as Primary")
 	return nil
@@ -611,8 +665,8 @@ func (v *VSRGInstance) processAsSecondary() (ctrl.Result, error) {
 
 	defer v.log.Info("Exiting processing VolSyncReplicationGroup")
 
-	if err := v.addFinalizer(vsrgFinalizerName); err != nil {
-		v.log.Info("Failed to add finalizer", "finalizer", vsrgFinalizerName, "errorValue", err)
+	if err := v.addFinalizer(VsrgFinalizerName); err != nil {
+		v.log.Info("Failed to add finalizer", "finalizer", VsrgFinalizerName, "errorValue", err)
 
 		msg := "Failed to add finalizer to VolSyncReplicationGroup"
 		setVRGDataErrorCondition(&v.instance.Status.Conditions, v.instance.Generation, msg)
@@ -665,7 +719,27 @@ func (v *VSRGInstance) reconcileVolSyncAsSecondary() error {
 			v.updateStatusWithRDInfo(*rdInfoForStatus)
 		}
 	}
-	//TODO: cleanup any RD that is not in rdSpec
+	//TODO: cleanup any RD that is not in rdSpec? may not be necessary?
+
+	// Cleanup - this VSRG is secondary, cleanup if necessary
+	// remove ReplicationSources that would have been created when this VSRG was
+	// primary if they are not in the RSSpec list
+	if err := v.volSyncHandler.CleanupRSNotInSpecList(v.instance.Spec.RSSpec); err != nil {
+		return err
+	}
+
+	// This may be a relocate scenario - in which case we want to run a final sync
+	// of the PVCs we've been syncing (via ReplicationDestinations) when we were primary
+	// Trigger final sync on any ReplicationDestination in the RSSpec list
+	for _, rsSpec := range v.instance.Spec.RSSpec {
+		finalSyncComplete, err := v.volSyncHandler.ReconcileRS(rsSpec, true /* Run final sync */)
+		if err != nil {
+			return err
+		}
+		if finalSyncComplete {
+			//TODO: will need to indicate status back to DRPC controller
+		}
+	}
 
 	v.log.Info("Successfully reconciled VolSync as Secondary")
 	return nil

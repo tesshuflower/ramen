@@ -129,6 +129,14 @@ var _ = BeforeSuite(func() {
 	}).SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 
+	err = (&ramencontrollers.VolSyncReplicationGroupReconciler{
+		Client:    k8sManager.GetClient(),
+		APIReader: k8sManager.GetAPIReader(),
+		Log:       ctrl.Log.WithName("controllers").WithName("VolSyncReplicationGroup"),
+		Scheme:    k8sManager.GetScheme(),
+	}).SetupWithManager(k8sManager)
+	Expect(err).ToNot(HaveOccurred())
+
 	drpcReconciler := (&ramencontrollers.DRPlacementControlReconciler{
 		Client:    k8sManager.GetClient(),
 		APIReader: k8sManager.GetAPIReader(),

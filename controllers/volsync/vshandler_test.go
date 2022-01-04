@@ -1,6 +1,8 @@
 package volsync_test
 
 import (
+	"strconv"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo"
@@ -143,6 +145,7 @@ var _ = Describe("VolSync Handler", func() {
 				Expect(*createdRD.Spec.Rsync.Capacity).To(Equal(capacity))
 				Expect(createdRD.Spec.Rsync.AccessModes).To(Equal([]corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}))
 				Expect(createdRD.Spec.Trigger).To(BeNil()) // No schedule should be set
+				Expect(createdRD.GetLabels()).To(HaveKeyWithValue(volsync.VSRGReplicationSourceLabel, owner.GetName()))
 			})
 
 			Context("When storageClassName is not specified", func() {
@@ -225,9 +228,10 @@ var _ = Describe("VolSync Handler", func() {
 			createdRS := &volsyncv1alpha1.ReplicationSource{}
 
 			JustBeforeEach(func() {
-				// Run ReconcileRS
-				err := vsHandler.ReconcileRS(rsSpec)
+				// Run ReconcileRS - Not running final sync so this should return false
+				finalSyncDone, err := vsHandler.ReconcileRS(rsSpec, false)
 				Expect(err).ToNot(HaveOccurred())
+				Expect(finalSyncDone).To(BeFalse())
 
 				// RS should be created with name=PVCName
 				Eventually(func() error {
@@ -248,6 +252,7 @@ var _ = Describe("VolSync Handler", func() {
 				Expect(createdRS.Spec.Trigger).To(Equal(&volsyncv1alpha1.ReplicationSourceTriggerSpec{
 					Schedule: &expectedCronSpecSchedule,
 				}))
+				Expect(createdRS.GetLabels()).To(HaveKeyWithValue(volsync.VSRGReplicationSourceLabel, owner.GetName()))
 			})
 
 			It("Should create an ReplicationSource if one does not exist", func() {
@@ -261,6 +266,9 @@ var _ = Describe("VolSync Handler", func() {
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      rsSpec.PVCName,
 							Namespace: testNamespace.GetName(),
+							Labels: map[string]string{
+								"customlabel1": "somevaluehere",
+							},
 						},
 						// Will expect the reconcile to fill this out properly for us (i.e. update)
 						Spec: volsyncv1alpha1.ReplicationSourceSpec{
@@ -279,6 +287,36 @@ var _ = Describe("VolSync Handler", func() {
 
 				It("Should properly update ReplicationSource and return rsInfo", func() {
 					// All checks here performed in the JustBeforeEach(common checks)
+				})
+
+				Context("When running a final sync", func() {
+					It("Should update the trigger on the RS and return true when replication is complete", func() {
+						// Run ReconcileRS - indicate final sync
+						finalSyncDone, err := vsHandler.ReconcileRS(rsSpec, true)
+						Expect(err).ToNot(HaveOccurred())
+						Expect(finalSyncDone).To(BeFalse()) // Should not return true since sync has not completed
+
+						// Check that the manual sync triggger is set correctly on the RS
+						Eventually(func() string {
+							err := k8sClient.Get(ctx,
+								types.NamespacedName{Name: rsSpec.PVCName, Namespace: testNamespace.GetName()}, createdRS)
+							if err != nil || createdRS.Spec.Trigger == nil {
+								return ""
+							}
+							return createdRS.Spec.Trigger.Manual
+						}, maxWait, interval).Should(Equal(volsync.FinalSyncTriggerString))
+
+						// We have triggered a final sync - manually update the status on the RS to
+						// simulate that it has completed the sync and confirm ReconcileRS correctly sees the update
+						createdRS.Status = &volsyncv1alpha1.ReplicationSourceStatus{
+							LastManualSync: volsync.FinalSyncTriggerString,
+						}
+						Expect(k8sClient.Status().Update(ctx, createdRS)).To(Succeed())
+
+						finalSyncDone, err = vsHandler.ReconcileRS(rsSpec, true)
+						Expect(err).ToNot(HaveOccurred())
+						Expect(finalSyncDone).To(BeTrue())
+					})
 				})
 			})
 		})
@@ -426,6 +464,231 @@ var _ = Describe("VolSync Handler", func() {
 						Expect(vsHandler.EnsurePVCfromRD(rdSpec)).To(Succeed())
 					})
 				})
+			})
+		})
+	})
+
+	Describe("Cleanup ReplicationDestination", func() {
+		pvcNamePrefix := "test-pvc-rdcleanuptests-"
+		pvcNamePrefixOtherOwner := "otherowner-test-pvc-rdcleanuptests-"
+		pvcCapacity := resource.MustParse("1Gi")
+		pvcStorageClassName := "teststorageclass"
+
+		var rdSpecList []ramendrv1alpha1.ReplicationDestinationSpec
+		var rdSpecListOtherOwner []ramendrv1alpha1.ReplicationDestinationSpec
+
+		BeforeEach(func() {
+			rdSpecList = []ramendrv1alpha1.ReplicationDestinationSpec{}
+			rdSpecListOtherOwner = []ramendrv1alpha1.ReplicationDestinationSpec{}
+
+			// Precreate some ReplicationDestinations
+			for i := 0; i < 10; i++ {
+				rdSpec := ramendrv1alpha1.ReplicationDestinationSpec{
+					VolSyncPVCInfo: ramendrv1alpha1.VolSyncPVCInfo{
+						PVCName:          pvcNamePrefix + strconv.Itoa(i),
+						StorageClassName: &pvcStorageClassName,
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceStorage: pvcCapacity,
+							},
+						},
+					},
+					SSHKeys: "testsecret",
+				}
+				rdSpecList = append(rdSpecList, rdSpec)
+			}
+
+			// Also create another vshandler with different owner - to simulate another VSRG in the
+			// same namespace.  Any RDs owned by this other owner should not be touched
+			otherOwnerCm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					GenerateName: "other-dummycm-owner-",
+					Namespace:    testNamespace.GetName(),
+				},
+			}
+			Expect(k8sClient.Create(ctx, otherOwnerCm)).To(Succeed())
+			Expect(otherOwnerCm.GetName()).NotTo(BeEmpty())
+			otherVSHandler := volsync.NewVSHandler(ctx, k8sClient, logger, otherOwnerCm, schedulingInterval)
+
+			for i := 0; i < 2; i++ {
+				otherOwnerRdSpec := ramendrv1alpha1.ReplicationDestinationSpec{
+					VolSyncPVCInfo: ramendrv1alpha1.VolSyncPVCInfo{
+						PVCName:          pvcNamePrefixOtherOwner + strconv.Itoa(i),
+						StorageClassName: &pvcStorageClassName,
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceStorage: pvcCapacity,
+							},
+						},
+					},
+					SSHKeys: "testsecret",
+				}
+				rdSpecListOtherOwner = append(rdSpecListOtherOwner, otherOwnerRdSpec)
+			}
+
+			for _, rdSpec := range rdSpecList {
+				// create RDs using our vsHandler
+				_, err := vsHandler.ReconcileRD(rdSpec)
+				Expect(err).NotTo(HaveOccurred())
+			}
+			for _, rdSpecOtherOwner := range rdSpecListOtherOwner {
+				// create other RDs using another vsHandler (will be owned by another vsrg)
+				_, err := otherVSHandler.ReconcileRD(rdSpecOtherOwner)
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			allRDs := &volsyncv1alpha1.ReplicationDestinationList{}
+			Eventually(func() int {
+				Expect(k8sClient.List(ctx, allRDs, client.InNamespace(testNamespace.GetName()))).To(Succeed())
+				return len(allRDs.Items)
+			}, maxWait, interval).Should(Equal(len(rdSpecList) + len(rdSpecListOtherOwner)))
+		})
+
+		Context("When rdSpec List is empty", func() {
+			It("Should clean up all rd instances for the VSRG", func() {
+				// Empty RDSpec list
+				Expect(vsHandler.CleanupRDNotInSpecList([]ramendrv1alpha1.ReplicationDestinationSpec{})).To(Succeed())
+
+				rdList := &volsyncv1alpha1.ReplicationDestinationList{}
+				Eventually(func() int {
+					Expect(k8sClient.List(ctx, rdList, client.InNamespace(testNamespace.GetName()))).To(Succeed())
+					return len(rdList.Items)
+				}, maxWait, interval).Should(Equal(len(rdSpecListOtherOwner)))
+
+				// The only ReplicationDestinations left should be owned by the other vsrg
+				for _, rd := range rdList.Items {
+					Expect(rd.GetName()).To(HavePrefix(pvcNamePrefixOtherOwner))
+				}
+			})
+		})
+
+		Context("When rdSpec List has some entries", func() {
+			It("Should clean up the proper rd instances for the VSRG", func() {
+				// List with only entries 2, 5 and 6 - the others should be cleaned up
+				sList := []ramendrv1alpha1.ReplicationDestinationSpec{
+					rdSpecList[2],
+					rdSpecList[5],
+					rdSpecList[6],
+				}
+				Expect(vsHandler.CleanupRDNotInSpecList(sList)).To(Succeed())
+
+				rdList := &volsyncv1alpha1.ReplicationDestinationList{}
+				Eventually(func() int {
+					Expect(k8sClient.List(ctx, rdList, client.InNamespace(testNamespace.GetName()))).To(Succeed())
+					return len(rdList.Items)
+				}, maxWait, interval).Should(Equal(3 + len(rdSpecListOtherOwner)))
+
+				// Check remaining RDs - check the correct ones were deleted
+				for _, rd := range rdList.Items {
+					Expect(strings.HasPrefix(rd.GetName(), pvcNamePrefixOtherOwner) ||
+						rd.GetName() == rdSpecList[2].PVCName ||
+						rd.GetName() == rdSpecList[5].PVCName ||
+						rd.GetName() == rdSpecList[6].PVCName).To(Equal(true))
+				}
+			})
+		})
+	})
+
+	Describe("Cleanup ReplicationSource", func() {
+		pvcNamePrefix := "test-pvc-rscleanuptests-"
+		pvcNamePrefixOtherOwner := "otherowner-test-pvc-rscleanuptests-"
+
+		var rsSpecList []ramendrv1alpha1.ReplicationSourceSpec
+		var rsSpecListOtherOwner []ramendrv1alpha1.ReplicationSourceSpec
+
+		BeforeEach(func() {
+			rsSpecList = []ramendrv1alpha1.ReplicationSourceSpec{}
+			rsSpecListOtherOwner = []ramendrv1alpha1.ReplicationSourceSpec{}
+
+			// Precreate some ReplicationSources
+			for i := 0; i < 10; i++ {
+				rsSpec := ramendrv1alpha1.ReplicationSourceSpec{
+					PVCName: pvcNamePrefix + strconv.Itoa(i),
+					Address: "10.1.2.3",
+					SSHKeys: "thisismykey",
+				}
+
+				rsSpecList = append(rsSpecList, rsSpec)
+			}
+
+			// Also create another vshandler with different owner - to simulate another VSRG in the
+			// same namespace.  Any RSs owned by this other owner should not be touched
+			otherOwnerCm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					GenerateName: "other-cm-owner-",
+					Namespace:    testNamespace.GetName(),
+				},
+			}
+			Expect(k8sClient.Create(ctx, otherOwnerCm)).To(Succeed())
+			Expect(otherOwnerCm.GetName()).NotTo(BeEmpty())
+			otherVSHandler := volsync.NewVSHandler(ctx, k8sClient, logger, otherOwnerCm, schedulingInterval)
+
+			for i := 0; i < 2; i++ {
+				otherOwnerRsSpec := ramendrv1alpha1.ReplicationSourceSpec{
+					PVCName: pvcNamePrefixOtherOwner + strconv.Itoa(i),
+					Address: "9.9.9.9",
+					SSHKeys: "testsecret",
+				}
+				rsSpecListOtherOwner = append(rsSpecListOtherOwner, otherOwnerRsSpec)
+			}
+
+			for _, rsSpec := range rsSpecList {
+				// create RSs using our vsHandler
+				_, err := vsHandler.ReconcileRS(rsSpec, false)
+				Expect(err).NotTo(HaveOccurred())
+			}
+			for _, rsSpecOtherOwner := range rsSpecListOtherOwner {
+				// create other RSs using another vsHandler (will be owned by another vsrg)
+				_, err := otherVSHandler.ReconcileRS(rsSpecOtherOwner, false)
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			allRSs := &volsyncv1alpha1.ReplicationSourceList{}
+			Eventually(func() int {
+				Expect(k8sClient.List(ctx, allRSs, client.InNamespace(testNamespace.GetName()))).To(Succeed())
+				return len(allRSs.Items)
+			}, maxWait, interval).Should(Equal(len(rsSpecList) + len(rsSpecListOtherOwner)))
+		})
+
+		Context("When rsSpec List is empty", func() {
+			It("Should clean up all rs instances for the VSRG", func() {
+				// Empty RSSpec list
+				Expect(vsHandler.CleanupRSNotInSpecList([]ramendrv1alpha1.ReplicationSourceSpec{})).To(Succeed())
+
+				rsList := &volsyncv1alpha1.ReplicationSourceList{}
+				Eventually(func() int {
+					Expect(k8sClient.List(ctx, rsList, client.InNamespace(testNamespace.GetName()))).To(Succeed())
+					return len(rsList.Items)
+				}, maxWait, interval).Should(Equal(len(rsSpecListOtherOwner)))
+
+				// The only ReplicationSources left should be owned by the other vsrg
+				for _, rs := range rsList.Items {
+					Expect(rs.GetName()).To(HavePrefix(pvcNamePrefixOtherOwner))
+				}
+			})
+		})
+
+		Context("When rsSpec List has some entries", func() {
+			It("Should clean up the proper rs instances for the VSRG", func() {
+				// List with only entries 2, 5 and 6 - the others should be cleaned up
+				sList := []ramendrv1alpha1.ReplicationSourceSpec{
+					rsSpecList[9],
+					rsSpecList[0],
+				}
+				Expect(vsHandler.CleanupRSNotInSpecList(sList)).To(Succeed())
+
+				rsList := &volsyncv1alpha1.ReplicationSourceList{}
+				Eventually(func() int {
+					Expect(k8sClient.List(ctx, rsList, client.InNamespace(testNamespace.GetName()))).To(Succeed())
+					return len(rsList.Items)
+				}, maxWait, interval).Should(Equal(2 + len(rsSpecListOtherOwner)))
+
+				// Check remaining RSs - check the correct ones were deleted
+				for _, rs := range rsList.Items {
+					Expect(strings.HasPrefix(rs.GetName(), pvcNamePrefixOtherOwner) ||
+						rs.GetName() == rsSpecList[0].PVCName ||
+						rs.GetName() == rsSpecList[9].PVCName).To(Equal(true))
+				}
 			})
 		})
 	})
