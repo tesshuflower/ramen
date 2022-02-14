@@ -62,8 +62,6 @@ const (
 	SanityCheckDelay = time.Minute * 10
 )
 
-var WaitForPVRestoreToComplete = errorswrapper.New("Waiting for PV restore to complete")
-
 var InitialWaitTimeForDRPCPlacementRule = errorswrapper.New("Waiting for DRPC Placement to produces placement decision")
 
 // ProgressCallback of function type
@@ -934,18 +932,18 @@ func (r *DRPlacementControlReconciler) getVRGsFromManagedClusters(drpc *rmn.DRPl
 	vrgs := map[string]*rmn.VolumeReplicationGroup{}
 
 	for _, drCluster := range drPolicy.Spec.DRClusterSet {
-		// Only fetch failover cluster VRG if action is Failover
-		if drpc.Spec.Action == rmn.ActionFailover && drpc.Spec.FailoverCluster != drCluster.Name {
-			r.Log.Info("Skipping fetching VRG", "cluster", drCluster.Name)
-
-			continue
-		}
-
 		vrg, err := r.MCVGetter.GetVRGFromManagedCluster(drpc.Name, drpc.Namespace, drCluster.Name)
 		if err != nil {
 			// Only NotFound error is accepted
 			if errors.IsNotFound(err) {
 				r.Log.Info(fmt.Sprintf("VRG not found on %q", drCluster.Name))
+
+				continue
+			}
+
+			if drpc.Spec.Action == rmn.ActionFailover && drpc.Spec.FailoverCluster != drCluster.Name {
+				r.Log.Info(fmt.Sprintf("Skipping fetching VRG from %s due to failure. Error (%v)",
+					drCluster.Name, err))
 
 				continue
 			}
