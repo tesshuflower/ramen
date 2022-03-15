@@ -45,9 +45,9 @@ const (
 )
 
 const (
-	VolumeSnapshotProtectFinalizerName string = "volsyncreplicationgroups.ramendr.openshift.io/volumesnapshot-protection"
-	VSRGReplicationSourceLabel         string = "volsyncreplicationgroup-owner"
-	FinalSyncTriggerString             string = "vsrg-final-sync"
+	VolumeSnapshotProtectFinalizerName string = "volumereplicationgroups.ramendr.openshift.io/volumesnapshot-protection"
+	VRGOwnerLabel                      string = "volumereplicationgroups-owner"
+	FinalSyncTriggerString             string = "vrg-final-sync"
 )
 
 type VSHandler struct {
@@ -95,7 +95,7 @@ func (v *VSHandler) ReconcileRD(
 			return err
 		}
 
-		addVSRGOwnerLabel(v.owner, rd)
+		addVRGOwnerLabel(v.owner, rd)
 
 		// Pre-allocated shared secret
 		var sshKeys *string
@@ -167,7 +167,7 @@ func (v *VSHandler) ReconcileRS(
 			return err
 		}
 
-		addVSRGOwnerLabel(v.owner, rs)
+		addVRGOwnerLabel(v.owner, rs)
 
 		rs.Spec.SourcePVC = rsSpec.PVCName
 
@@ -226,7 +226,7 @@ func (v *VSHandler) ReconcileRS(
 }
 
 func (v *VSHandler) DeleteRS(rsName string) error {
-	// Remove any ReplicationSource owned (by parent vsrg owner) that is not in the provided rsSpecList
+	// Remove any ReplicationSource owned (by parent vrg owner) that is not in the provided rsSpecList
 	currentRSListByOwner, err := v.listRSByOwner()
 	if err != nil {
 		return err
@@ -247,7 +247,7 @@ func (v *VSHandler) DeleteRS(rsName string) error {
 }
 
 func (v *VSHandler) CleanupRDNotInSpecList(rdSpecList []ramendrv1alpha1.VolSyncReplicationDestinationSpec) error {
-	// Remove any ReplicationDestination owned (by parent vsrg owner) that is not in the provided rdSpecList
+	// Remove any ReplicationDestination owned (by parent vrg owner) that is not in the provided rdSpecList
 	currentRDListByOwner, err := v.listRDByOwner()
 	if err != nil {
 		return err
@@ -316,7 +316,7 @@ func (v *VSHandler) reconcileServiceExportForRD(rd *volsyncv1alpha1.ReplicationD
 func (v *VSHandler) listRSByOwner() (volsyncv1alpha1.ReplicationSourceList, error) {
 	rsList := volsyncv1alpha1.ReplicationSourceList{}
 	if err := v.listByOwner(&rsList); err != nil {
-		v.log.Error(err, "Failed to list ReplicationSources for VSRG", "vsrg name", v.owner.GetName())
+		v.log.Error(err, "Failed to list ReplicationSources for VRG", "vrg name", v.owner.GetName())
 		return rsList, err
 	}
 	return rsList, nil
@@ -325,16 +325,16 @@ func (v *VSHandler) listRSByOwner() (volsyncv1alpha1.ReplicationSourceList, erro
 func (v *VSHandler) listRDByOwner() (volsyncv1alpha1.ReplicationDestinationList, error) {
 	rdList := volsyncv1alpha1.ReplicationDestinationList{}
 	if err := v.listByOwner(&rdList); err != nil {
-		v.log.Error(err, "Failed to list ReplicationDestinations for VSRG", "vsrg name", v.owner.GetName())
+		v.log.Error(err, "Failed to list ReplicationDestinations for VRG", "vrg name", v.owner.GetName())
 		return rdList, err
 	}
 	return rdList, nil
 }
 
-// Lists only RS/RD with VSRGReplicationSourceLabel that matches the owner
+// Lists only RS/RD with VRGOwnerLabel that matches the owner
 func (v *VSHandler) listByOwner(list client.ObjectList) error {
 	matchLabels := map[string]string{
-		VSRGReplicationSourceLabel: v.owner.GetName(),
+		VRGOwnerLabel: v.owner.GetName(),
 	}
 	listOptions := []client.ListOption{
 		client.InNamespace(v.owner.GetNamespace()),
@@ -527,12 +527,6 @@ func (v *VSHandler) getScheduleCronSpec() (*string, error) {
 	if v.schedulingInterval != "" {
 		return ConvertSchedulingIntervalToCronSpec(v.schedulingInterval)
 	}
-	/*
-		// Fall-back to getting scheduling interval from VolSyncProfile
-		if v.volSyncProfile != nil && v.volSyncProfile.SchedulingInterval != "" {
-			return ConvertSchedulingIntervalToCronSpec(v.volSyncProfile.SchedulingInterval)
-		}
-	*/
 
 	// Use default value if not specified
 	return &DefaultScheduleCronSpec, nil
@@ -569,13 +563,13 @@ func ConvertSchedulingIntervalToCronSpec(schedulingInterval string) (*string, er
 	return &cronSpec, nil
 }
 
-func addVSRGOwnerLabel(owner, obj metav1.Object) {
-	// Set vsrg label to owner name - enables lookups by owner label
+func addVRGOwnerLabel(owner, obj metav1.Object) {
+	// Set vrg label to owner name - enables lookups by owner label
 	labels := obj.GetLabels()
 	if labels == nil {
 		labels = make(map[string]string)
 	}
-	labels[VSRGReplicationSourceLabel] = owner.GetName()
+	labels[VRGOwnerLabel] = owner.GetName()
 	obj.SetLabels(labels)
 }
 
