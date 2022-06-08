@@ -51,7 +51,8 @@ const (
 	VolumeSnapshotIsDefaultAnnotation      string = "snapshot.storage.kubernetes.io/is-default-class"
 	VolumeSnapshotIsDefaultAnnotationValue string = "true"
 
-	PodVolumePVCClaimIndexName string = "spec.volumes.persistentVolumeClaim.claimName"
+	PodVolumePVCClaimIndexName    string = "spec.volumes.persistentVolumeClaim.claimName"
+	VolumeAttachmentToPVIndexName string = "spec.source.persistentVolumeName"
 
 	VRGOwnerLabel          string = "volumereplicationgroups-owner"
 	FinalSyncTriggerString string = "vrg-final-sync"
@@ -89,9 +90,11 @@ func NewVSHandler(ctx context.Context, client client.Client, log logr.Logger, ow
 	}
 }
 
-// VSHandler requires an index on pods to keep track of persistent volume claims mounted
+// VSHandler will either look at VolumeAttachments or pods to determine if a PVC is mounted
+// To do this, it requires an index on pods and volumeattachments to keep track of persistent volume claims mounted
 func IndexFieldsForVSHandler(ctx context.Context, fieldIndexer client.FieldIndexer) error {
-	return fieldIndexer.IndexField(ctx, &corev1.Pod{}, PodVolumePVCClaimIndexName, func(o client.Object) []string {
+	// Index on pods - used to be able to check if a pvc is mounted to a pod
+	err := fieldIndexer.IndexField(ctx, &corev1.Pod{}, PodVolumePVCClaimIndexName, func(o client.Object) []string {
 		var res []string
 		for _, vol := range o.(*corev1.Pod).Spec.Volumes {
 			if vol.PersistentVolumeClaim == nil {
@@ -103,6 +106,23 @@ func IndexFieldsForVSHandler(ctx context.Context, fieldIndexer client.FieldIndex
 
 		return res
 	})
+
+	if err != nil {
+		return err
+	}
+
+	// Index on volumeattachments - used to be able to check if a pvc is mounted to a node
+	// This will be the preferred check to determine if a PVC is unmounted (i.e. if no volume attachment
+	// to any node, then the PV for a PVC is unmounted).  However not all storage drivers may support this.
+	return fieldIndexer.IndexField(ctx, &storagev1.VolumeAttachment{}, VolumeAttachmentToPVIndexName,
+		func(o client.Object) []string {
+			var res []string
+			sourcePVName := o.(*storagev1.VolumeAttachment).Spec.Source.PersistentVolumeName
+			if sourcePVName != nil {
+				res = append(res, *sourcePVName)
+			}
+			return res
+		})
 }
 
 // returns replication destination only if create/update is successful and the RD is considered available.
@@ -291,16 +311,16 @@ func (v *VSHandler) validatePVCBeforeRS(rsSpec ramendrv1alpha1.VolSyncReplicatio
 	l := v.log.WithValues("rsSpec", rsSpec, "runFinalSync", runFinalSync)
 
 	if runFinalSync {
-		// If runFinalSync, check the PVC and make sure it's not in use (not mounted by any pod) before proceeding
+		// If runFinalSync, check the PVC and make sure it's not mounted
 		// as we want the app to be quiesced/removed before running final sync
-		existsAndInUse, err := v.pvcExistsAndInUse(rsSpec.ProtectedPVC.Name, false)
+		existsAndMounted, err := v.pvcExistsAndMounted(rsSpec.ProtectedPVC.Name)
 		if err != nil {
 			l.Error(err, "error checking if pvc is in use")
 
 			return false, err
 		}
 
-		if existsAndInUse {
+		if existsAndMounted {
 			l.Info("pvc is still in use, not reconciling RS for final sync yet ...")
 
 			return false, nil
@@ -502,14 +522,13 @@ func (v *VSHandler) PreparePVCForFinalSync(pvcName string) (bool, error) {
 	return true, nil
 }
 
-// Will return true only if the pvc exists and in use - will not throw error if PVC not found
-func (v *VSHandler) pvcExistsAndInUse(pvcName string, inUsePodMustBeReady bool) (bool, error) {
-	_, err := v.getPVC(pvcName)
+func (v *VSHandler) pvcExistsAndMounted(pvcName string) (bool, error) {
+	pvc, err := v.getPVC(pvcName)
 	if err != nil {
 		if kerrors.IsNotFound(err) {
 			v.log.Info("PVC not found", "pvcName", pvcName)
 
-			return false, nil // No error just indicate not exists and not in use
+			return false, nil // No error just indicate not exists (assumed not mounted)
 		}
 
 		return false, err // error accessing the PVC, return it
@@ -517,10 +536,128 @@ func (v *VSHandler) pvcExistsAndInUse(pvcName string, inUsePodMustBeReady bool) 
 
 	v.log.V(1).Info("pvc found", "pvcName", pvcName)
 
-	return v.isPvcInUse(pvcName, inUsePodMustBeReady)
+	return v.isPvcMounted(pvc)
 }
 
-func (v *VSHandler) isPvcInUse(pvcName string, inUsePodMustBeReady bool) (bool, error) {
+func (v *VSHandler) isPvcMounted(pvc *corev1.PersistentVolumeClaim) (bool, error) {
+	// Mounted check will prefer to check if PVC is mounted via checking for VolumeAttachments.
+	//
+	// However, some storage drivers may have attachRequired set to `false` which means we cannot rely
+	// on checking volume attachments.
+	// If storage driver spec.attachRequired is set to false, then we will fall back to checking if the
+	// PVC is in use by a Pod.  This essentially will check if any pod is mounting the PVC.
+	//
+	// Volume attachments however are preferred if possible as once a volume attachment is removed,
+	// this indicates the underlying PV is unmounted from nodes, and I/O should be complete to the PVC
+	// (i.e. it should be safe to run a final replication sync before a Relocate).
+
+	useVA, err := v.useVolumeAttachmentForPVCMountCheck(pvc)
+	if err != nil {
+		return false, err
+	}
+	if useVA {
+		return v.isPvAttachedToNode(pvc)
+	}
+
+	return v.isPvcInUseByPod(pvc.GetName(), false /* no ready check, just check if a pod is mounting the pvc */)
+}
+
+func (v *VSHandler) isPvAttachedToNode(pvc *corev1.PersistentVolumeClaim) (bool, error) {
+	pvName := pvc.Spec.VolumeName
+	if pvName == "" {
+		// Assuming if no volumename is set, the PVC has not been bound yet, so return false for in-use
+		v.log.V(1).Info("pvc has no VolumeName set, assuming not in-use", "pvcName", pvc.GetName())
+		return false, nil
+	}
+
+	// Lookup volumeattachments to determine if the PVC is mounted to a node - use our index
+	// (needs to be setup in the cache - see IndexFieldsForVSHandler())
+	volAttachmentList := &storagev1.VolumeAttachmentList{}
+
+	// Volume attachments are cluster-scoped, so no need to restrict query to our namespace
+	err := v.client.List(v.ctx,
+		volAttachmentList,
+		client.MatchingFields{VolumeAttachmentToPVIndexName: pvName})
+	if err != nil {
+		v.log.Error(err, "unable to lookup volumeattachments to see if pv for pvc is in use",
+			"pvcName", pvc.GetName(), "pvName", pvName)
+	}
+
+	if len(volAttachmentList.Items) == 0 {
+		// PV for our PVC is Not attached to any node
+		return false, nil
+	}
+
+	attachedNodes := []string{}
+	for _, volAttachment := range volAttachmentList.Items {
+		attachedNodes = append(attachedNodes, volAttachment.Spec.NodeName)
+	}
+
+	v.log.Info("pvc is attached to node(s), assuming in-use", "pvcName", pvc.GetName(), "pvName", pvName,
+		"nodes", attachedNodes)
+
+	return true, nil
+}
+
+func (v *VSHandler) useVolumeAttachmentForPVCMountCheck(pvc *corev1.PersistentVolumeClaim) (bool, error) {
+	if pvc.Spec.StorageClassName == nil {
+		// This shouldn't ever happen
+		v.log.Info("PVC does not have a StorageClassName defined", "pvcName", pvc.GetName())
+		return true, nil
+	}
+
+	storageClassName := *pvc.Spec.StorageClassName
+
+	storageClass := &storagev1.StorageClass{}
+	if err := v.client.Get(v.ctx, types.NamespacedName{Name: storageClassName}, storageClass); err != nil {
+		v.log.Error(err, "Failed to get StorageClass", "name", storageClassName)
+
+		return true, fmt.Errorf("error getting storage class (%w)", err)
+	}
+
+	csiDriverName := storageClass.Provisioner
+	csiDriver := &storagev1.CSIDriver{}
+	err := v.client.Get(v.ctx, types.NamespacedName{Name: csiDriverName}, csiDriver)
+	if kerrors.IsNotFound(err) {
+		v.log.Info("CSI driver not found - assuming volume attachment can be checked for PVC mount status")
+		//TODO: check this is the correct thing to do
+		return true, nil
+	}
+	if err != nil {
+		v.log.Error(err, "Error getting CSIDriver", "name", csiDriverName)
+		return true, fmt.Errorf("error getting CSI Driver (%w)", err)
+	}
+
+	if csiDriver.Spec.AttachRequired != nil && !*csiDriver.Spec.AttachRequired {
+		v.log.Info("CSI driver spec has AttachRequired: false - will not use volumeattachments to " +
+			"check for PVC mount status")
+		return false, nil
+	}
+
+	v.log.Info("CSI driver does not specify that attach required is false, will use volumeattachments to "+
+		"check for PVC mount status", "spec.AttachRequired", csiDriver.Spec.AttachRequired)
+	return true, nil
+}
+
+// Will return true only if the pvc exists and in use - will not throw error if PVC not found
+func (v *VSHandler) pvcExistsAndInUse(pvcName string, inUsePodMustBeReady bool) (bool, error) {
+	_, err := v.getPVC(pvcName)
+	if err != nil {
+		if kerrors.IsNotFound(err) {
+			v.log.Info("PVC not found", "pvcName", pvcName)
+
+			return false, nil // No error just indicate not exists (so also not in use)
+		}
+
+		return false, err // error accessing the PVC, return it
+	}
+
+	v.log.V(1).Info("pvc found", "pvcName", pvcName)
+
+	return v.isPvcInUseByPod(pvcName, inUsePodMustBeReady)
+}
+
+func (v *VSHandler) isPvcInUseByPod(pvcName string, inUsePodMustBeReady bool) (bool, error) {
 	podUsingPVCList := &corev1.PodList{}
 
 	err := v.client.List(context.Background(),
