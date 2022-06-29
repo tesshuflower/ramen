@@ -793,6 +793,39 @@ func (v *VSHandler) DeleteRD(pvcName string) error {
 	return nil
 }
 
+func (v *VSHandler) CleanupRSNotInSpecList(rsSpecList []ramendrv1alpha1.VolSyncReplicationSourceSpec) error {
+	// Remove any ReplicationSource owned (by parent vsrg owner) that is not in the provided rsSpecList
+	currentRSListByOwner, err := v.listRSByOwner()
+	if err != nil {
+		return err
+	}
+
+	for i := range currentRSListByOwner.Items {
+		rs := currentRSListByOwner.Items[i]
+
+		foundInSpecList := false
+
+		for _, rsSpec := range rsSpecList {
+			if rs.GetName() == getReplicationSourceName(rsSpec.ProtectedPVC.Name) {
+				foundInSpecList = true
+
+				break
+			}
+		}
+
+		if !foundInSpecList {
+			// Delete the ReplicationSource, log errors with cleanup but continue on
+			if err := v.client.Delete(v.ctx, &rs); err != nil {
+				v.log.Error(err, "Error cleaning up ReplicationSource", "name", rs.GetName())
+			} else {
+				v.log.Info("Deleted ReplicationSource", "name", rs.GetName())
+			}
+		}
+	}
+
+	return nil
+}
+
 func (v *VSHandler) CleanupRDNotInSpecList(rdSpecList []ramendrv1alpha1.VolSyncReplicationDestinationSpec) error {
 	// Remove any ReplicationDestination owned (by parent vrg owner) that is not in the provided rdSpecList
 	currentRDListByOwner, err := v.listRDByOwner()

@@ -74,7 +74,7 @@ func (v *VRGInstance) restorePVsForVolSync() error {
 	return nil
 }
 
-//nolint:funlen,gocognit,cyclop
+//nolint:funlen,gocognit,cyclop,gocyclo
 func (v *VRGInstance) reconcileVolSyncAsPrimary() (requeue bool) {
 	v.log.Info(fmt.Sprintf("Reconciling VolSync as Primary. VolSyncPVCs %d. VolSyncSpec %+v",
 		len(v.volSyncPVCs), v.instance.Spec.VolSync))
@@ -92,7 +92,7 @@ func (v *VRGInstance) reconcileVolSyncAsPrimary() (requeue bool) {
 		return
 	}
 
-	finalSyncPrepareCount := 0
+	rsSpecList := []ramendrv1alpha1.VolSyncReplicationSourceSpec{}
 
 	// First time: Add all VolSync PVCs to the protected PVC list and set their ready condition to initializing
 	for _, pvc := range v.volSyncPVCs {
@@ -119,6 +119,8 @@ func (v *VRGInstance) reconcileVolSyncAsPrimary() (requeue bool) {
 			ProtectedPVC: *protectedPVC,
 		}
 
+		rsSpecList = append(rsSpecList, rsSpec) // list of rsSpec, one for each pvc in volSyncPVCs
+
 		if v.instance.Spec.PrepareForFinalSync {
 			prepared, err := v.volSyncHandler.PreparePVCForFinalSync(pvc.Name)
 			if err != nil || !prepared {
@@ -126,8 +128,6 @@ func (v *VRGInstance) reconcileVolSyncAsPrimary() (requeue bool) {
 
 				continue
 			}
-
-			finalSyncPrepareCount++
 		}
 
 		// reconcile RS and if runFinalSync is true, then one final sync will be run
@@ -149,6 +149,11 @@ func (v *VRGInstance) reconcileVolSyncAsPrimary() (requeue bool) {
 		if v.instance.Spec.RunFinalSync && !finalSyncComplete {
 			requeue = true
 		}
+	}
+
+	// In case volSyncPVCs has changed, clean up any RS that is no longer in the list
+	if err := v.volSyncHandler.CleanupRSNotInSpecList(rsSpecList); err != nil {
+		requeue = true
 	}
 
 	if requeue {
@@ -195,7 +200,7 @@ func (v *VRGInstance) reconcileVolSyncAsSecondary() (requeue bool) {
 	v.instance.Status.PrepareForFinalSyncComplete = false
 	v.instance.Status.FinalSyncComplete = false
 
-	// Reconcile RDSpec (deletion or replication)
+	// Reconcile RDSpec
 	for _, rdSpec := range v.instance.Spec.VolSync.RDSpec {
 		v.log.Info("Reconcile RD as Secondary", "RDSpec", rdSpec)
 
@@ -212,6 +217,11 @@ func (v *VRGInstance) reconcileVolSyncAsSecondary() (requeue bool) {
 			// Replication destination is not ready yet, indicate we should requeue after the for loop is complete
 			requeue = true
 		}
+	}
+
+	// In case the rdSpec list has changed, clean up any RD that is no longer in the list
+	if err := v.volSyncHandler.CleanupRDNotInSpecList(v.instance.Spec.VolSync.RDSpec); err != nil {
+		requeue = true
 	}
 
 	if requeue {
@@ -345,7 +355,7 @@ func (v *VRGInstance) buildDataProtectedCondition() *v1.Condition {
 		}
 	} else {
 		for _, rdSpec := range v.instance.Spec.VolSync.RDSpec {
-			v.log.Info("Reconcile RD as Secondary", "RDSpec", rdSpec)
+			v.log.Info("Check if RDData protected as Secondary", "RDSpec", rdSpec)
 			rdDataProtected, err := v.volSyncHandler.IsRDDataProtected(rdSpec.ProtectedPVC.Name)
 			if err != nil || !rdDataProtected {
 				ready = false

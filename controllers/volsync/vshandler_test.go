@@ -1451,6 +1451,50 @@ var _ = Describe("VolSync Handler", func() {
 			}, maxWait, interval).Should(Equal(len(rsSpecList) + len(rsSpecListOtherOwner)))
 		})
 
+		Context("When rsSpec List is empty", func() {
+			It("Should clean up all rs instances for the VRG", func() {
+				// Empty RSSpec list
+				Expect(vsHandler.CleanupRSNotInSpecList([]ramendrv1alpha1.VolSyncReplicationSourceSpec{})).To(Succeed())
+
+				rsList := &volsyncv1alpha1.ReplicationSourceList{}
+				Eventually(func() int {
+					Expect(k8sClient.List(ctx, rsList, client.InNamespace(testNamespace.GetName()))).To(Succeed())
+
+					return len(rsList.Items)
+				}, maxWait, interval).Should(Equal(len(rsSpecListOtherOwner)))
+
+				// The only ReplicationSources left should be owned by the other VRG
+				for _, rs := range rsList.Items {
+					Expect(rs.GetName()).To(HavePrefix(pvcNamePrefixOtherOwner))
+				}
+			})
+		})
+
+		Context("When rsSpec List has some entries", func() {
+			It("Should clean up the proper rs instances for the VRG", func() {
+				// List with only entries 2, 5 and 6 - the others should be cleaned up
+				sList := []ramendrv1alpha1.VolSyncReplicationSourceSpec{
+					rsSpecList[9],
+					rsSpecList[0],
+				}
+				Expect(vsHandler.CleanupRSNotInSpecList(sList)).To(Succeed())
+
+				rsList := &volsyncv1alpha1.ReplicationSourceList{}
+				Eventually(func() int {
+					Expect(k8sClient.List(ctx, rsList, client.InNamespace(testNamespace.GetName()))).To(Succeed())
+
+					return len(rsList.Items)
+				}, maxWait, interval).Should(Equal(2 + len(rsSpecListOtherOwner)))
+
+				// Check remaining RSs - check the correct ones were deleted
+				for _, rs := range rsList.Items {
+					Expect(strings.HasPrefix(rs.GetName(), pvcNamePrefixOtherOwner) ||
+						rs.GetName() == rsSpecList[0].ProtectedPVC.Name ||
+						rs.GetName() == rsSpecList[9].ProtectedPVC.Name).To(Equal(true))
+				}
+			})
+		})
+
 		It("Should delete an RS when it belongs to the VRG", func() {
 			rsToDelete1 := rsSpecList[3].ProtectedPVC.Name // rs name should == pvc name
 			Expect(vsHandler.DeleteRS(rsToDelete1)).To(Succeed())

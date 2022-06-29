@@ -12,7 +12,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	volsyncv1alpha1 "github.com/backube/volsync/api/v1alpha1"
@@ -151,39 +150,106 @@ var _ = Describe("VolumeReplicationGroupController", func() {
 					Expect(foundBoundPVC2).To(BeTrue())
 				})
 
-				Context("When RSSpec entries are added to vrg spec", func() {
-					It("Should create ReplicationSources for each", func() {
+				It("Should create ReplicationSources for each", func() {
+					allRSs := &volsyncv1alpha1.ReplicationSourceList{}
+					Eventually(func() int {
+						Expect(k8sClient.List(testCtx, allRSs,
+							client.InNamespace(testNamespace.GetName()))).To(Succeed())
+
+						return len(allRSs.Items)
+					}, testMaxWait, testInterval).Should(Equal(len(testVsrg.Status.ProtectedPVCs)))
+
+					rs0 := &volsyncv1alpha1.ReplicationSource{}
+					Expect(k8sClient.Get(testCtx, types.NamespacedName{
+						Name: boundPvcs[0].GetName(), Namespace: testNamespace.GetName(),
+					}, rs0)).To(Succeed())
+					Expect(rs0.Spec.SourcePVC).To(Equal(boundPvcs[0].GetName()))
+					Expect(rs0.Spec.Trigger).NotTo(BeNil())
+					Expect(*rs0.Spec.Trigger.Schedule).To(Equal("0 */1 * * *")) // scheduling interval was set to 1h
+
+					rs1 := &volsyncv1alpha1.ReplicationSource{}
+					Expect(k8sClient.Get(testCtx, types.NamespacedName{
+						Name: boundPvcs[1].GetName(), Namespace: testNamespace.GetName(),
+					}, rs1)).To(Succeed())
+					Expect(rs1.Spec.SourcePVC).To(Equal(boundPvcs[1].GetName()))
+					Expect(rs1.Spec.Trigger).NotTo(BeNil())
+					Expect(*rs1.Spec.Trigger.Schedule).To(Equal("0 */1 * * *")) // scheduling interval was set to 1h
+
+					rs2 := &volsyncv1alpha1.ReplicationSource{}
+					Expect(k8sClient.Get(testCtx, types.NamespacedName{
+						Name: boundPvcs[2].GetName(), Namespace: testNamespace.GetName(),
+					}, rs2)).To(Succeed())
+					Expect(rs2.Spec.SourcePVC).To(Equal(boundPvcs[2].GetName()))
+					Expect(rs2.Spec.Trigger).NotTo(BeNil())
+					Expect(*rs2.Spec.Trigger.Schedule).To(Equal("0 */1 * * *")) // scheduling interval was set to 1h
+				})
+
+				Context("When a PVC is removed or label no longer matches the label selector", func() {
+					JustBeforeEach(func() {
+						// Delete pvc[1]
+						pvcToDel := &boundPvcs[1]
+						Eventually(func() bool {
+							err := k8sClient.Delete(testCtx, pvcToDel)
+							if err != nil {
+								// Success if pvc is gone
+								return errors.IsNotFound(err)
+							}
+
+							err = k8sClient.Get(testCtx, client.ObjectKeyFromObject(pvcToDel), pvcToDel)
+							if err != nil {
+								// Success if pvc is gone
+								return errors.IsNotFound(err)
+							}
+
+							testLogger.Info("### PVC to del", "pvcToDel", &pvcToDel)
+
+							// PVCs have a finalizer that's never cleared as there's no controller for this
+							// manually remove the finalizer so the delete can proceed
+							pvcToDel.Finalizers = []string{}
+							k8sClient.Update(testCtx, pvcToDel)
+
+							return false
+						}, testMaxWait, interval).Should(BeTrue())
+
+						// Update label so it won't be found by the label selector for pvc[2]
+						pvcRemLabel := &boundPvcs[2]
+						updatedLabels := map[string]string{}
+						for labelKey, labelVal := range pvcRemLabel.GetLabels() {
+							if _, ok := testMatchLabels[labelKey]; !ok {
+								updatedLabels[labelKey] = labelVal
+							}
+						}
+
+						Eventually(func() bool {
+							err := k8sClient.Get(testCtx, client.ObjectKeyFromObject(pvcRemLabel), pvcRemLabel)
+							if err != nil {
+								return false
+							}
+
+							// Update labels
+							pvcRemLabel.Labels = updatedLabels
+							err = k8sClient.Update(testCtx, pvcRemLabel)
+							return err == nil
+						}, testMaxWait, interval).Should(BeTrue())
+					})
+
+					It("Should remove RSs for the pvcs that were removed or no longer match the label selector", func() {
 						allRSs := &volsyncv1alpha1.ReplicationSourceList{}
 						Eventually(func() int {
+							// In vrg reconcile, pvcList should now no longer load pvc1 (because of deletion)
+							// and pvc2 (because labels no longer match)
+							// Now the ReplicationDestinations for these should be removed as well
 							Expect(k8sClient.List(testCtx, allRSs,
 								client.InNamespace(testNamespace.GetName()))).To(Succeed())
 
 							return len(allRSs.Items)
-						}, testMaxWait, testInterval).Should(Equal(len(testVsrg.Status.ProtectedPVCs)))
+						}, testMaxWait, testInterval).Should(Equal(1))
 
-						rs0 := &volsyncv1alpha1.ReplicationSource{}
-						Expect(k8sClient.Get(testCtx, types.NamespacedName{
-							Name: boundPvcs[0].GetName(), Namespace: testNamespace.GetName(),
-						}, rs0)).To(Succeed())
-						Expect(rs0.Spec.SourcePVC).To(Equal(boundPvcs[0].GetName()))
-						Expect(rs0.Spec.Trigger).NotTo(BeNil())
-						Expect(*rs0.Spec.Trigger.Schedule).To(Equal("0 */1 * * *")) // scheduling interval was set to 1h
+						remainingRS := allRSs.Items[0]
 
-						rs1 := &volsyncv1alpha1.ReplicationSource{}
-						Expect(k8sClient.Get(testCtx, types.NamespacedName{
-							Name: boundPvcs[1].GetName(), Namespace: testNamespace.GetName(),
-						}, rs1)).To(Succeed())
-						Expect(rs1.Spec.SourcePVC).To(Equal(boundPvcs[1].GetName()))
-						Expect(rs1.Spec.Trigger).NotTo(BeNil())
-						Expect(*rs1.Spec.Trigger.Schedule).To(Equal("0 */1 * * *")) // scheduling interval was set to 1h
+						Expect(remainingRS.Spec.SourcePVC).To(Equal(boundPvcs[0].GetName()))
 
-						rs2 := &volsyncv1alpha1.ReplicationSource{}
-						Expect(k8sClient.Get(testCtx, types.NamespacedName{
-							Name: boundPvcs[2].GetName(), Namespace: testNamespace.GetName(),
-						}, rs2)).To(Succeed())
-						Expect(rs2.Spec.SourcePVC).To(Equal(boundPvcs[2].GetName()))
-						Expect(rs2.Spec.Trigger).NotTo(BeNil())
-						Expect(*rs2.Spec.Trigger.Schedule).To(Equal("0 */1 * * *")) // scheduling interval was set to 1h
+						//TODO: Need to check status and ensure they are removed from protectedPVCs
 					})
 				})
 			})
@@ -284,8 +350,6 @@ var _ = Describe("VolumeReplicationGroupController", func() {
 						return k8sClient.Update(testCtx, testVrg)
 					}, testMaxWait, testInterval).Should(Succeed())
 
-					Expect(k8sClient.Update(testCtx, testVrg)).To(Succeed())
-
 					allRDs := &volsyncv1alpha1.ReplicationDestinationList{}
 					Eventually(func() int {
 						Expect(k8sClient.List(testCtx, allRDs,
@@ -324,14 +388,22 @@ var _ = Describe("VolumeReplicationGroupController", func() {
 					Expect(*rd1.Spec.Rsync.ServiceType).To(Equal(corev1.ServiceTypeClusterIP))
 				})
 
-				Context("When ReplicationDestinations have address set in status", func() {
+				Context("When ReplicationDestinations have address set in status and latest Image", func() {
 					rd0Address := "99.98.97.96"
 					rd1Address := "99.88.77.66"
 					JustBeforeEach(func() {
+						snapApiGroup := snapv1.GroupName
+
 						// fake address set in status on the ReplicationDestinations
+						// and also fake out latestImage
 						rd0.Status = &volsyncv1alpha1.ReplicationDestinationStatus{
 							Rsync: &volsyncv1alpha1.ReplicationDestinationRsyncStatus{
 								Address: &rd0Address,
+							},
+							LatestImage: &corev1.TypedLocalObjectReference{
+								Name:     "my-test-snap0",
+								APIGroup: &snapApiGroup,
+								Kind:     "VolumeSnapshot",
 							},
 						}
 						Expect(k8sClient.Status().Update(testCtx, rd0)).To(Succeed())
@@ -340,8 +412,60 @@ var _ = Describe("VolumeReplicationGroupController", func() {
 							Rsync: &volsyncv1alpha1.ReplicationDestinationRsyncStatus{
 								Address: &rd1Address,
 							},
+							LatestImage: &corev1.TypedLocalObjectReference{
+								Name:     "my-test-snap1",
+								APIGroup: &snapApiGroup,
+								Kind:     "VolumeSnapshot",
+							},
 						}
 						Expect(k8sClient.Status().Update(testCtx, rd1)).To(Succeed())
+					})
+
+					It("Should update the status of the vrg to indicate data protected", func() {
+						Eventually(func() bool {
+							err := k8sClient.Get(testCtx, client.ObjectKeyFromObject(testVrg), testVrg)
+							if err != nil {
+								return false
+							}
+
+							testLogger.Info("test VRG looks like this", "testVrg", testVrg)
+
+							for _, cond := range testVrg.Status.Conditions {
+								if cond.Type == "DataProtected" {
+									return cond.Status == metav1.ConditionTrue
+								}
+							}
+
+							return false
+						}, testMaxWait, interval).Should(BeTrue())
+					})
+				})
+
+				Context("When a RDSpec is removed from the vrg spec", func() {
+					JustBeforeEach(func() {
+						Eventually(func() error {
+							err := k8sClient.Get(testCtx, client.ObjectKeyFromObject(testVrg), testVrg)
+							if err != nil {
+								return err
+							}
+
+							updatedRDList := []ramendrv1alpha1.VolSyncReplicationDestinationSpec{
+								testVrg.Spec.VolSync.RDSpec[0],
+							}
+							testVrg.Spec.VolSync.RDSpec = updatedRDList
+
+							return k8sClient.Update(testCtx, testVrg)
+						}, testMaxWait, testInterval).Should(Succeed())
+					})
+
+					It("Should remove the RD that no longer has an RDSpec", func() {
+						allRDs := &volsyncv1alpha1.ReplicationDestinationList{}
+						Eventually(func() int {
+							Expect(k8sClient.List(testCtx, allRDs,
+								client.InNamespace(testNamespace.GetName()))).To(Succeed())
+
+							return len(allRDs.Items)
+						}, testMaxWait, testInterval).Should(Equal(1))
 					})
 				})
 			})
