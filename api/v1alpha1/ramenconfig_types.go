@@ -123,20 +123,7 @@ type RamenConfig struct {
 	} `json:"drClusterOperator,omitempty"`
 
 	// VolSync configuration
-	VolSync struct {
-		// Disabled is used to disable VolSync usage in Ramen. Defaults to false.
-		Disabled bool `json:"disabled,omitempty"`
-
-		// Default cephFS CSIDriver name used to enable ROX volumes. If this name matches
-		// the PVC's storageclass provisioner, a new storageclass will be created and the
-		// name of it passed to VolSync alongside the readOnly flag access mode.
-		CephFSCSIDriverName string `json:"cephFSCSIDriverName,omitempty"`
-
-		// destinationCopyMethod indicates the method that should be used when syncing
-		// from source to destination. Should be Snapshot/Direct
-		// default: Snapshot
-		DestinationCopyMethod string `json:"destinationCopyMethod,omitempty"`
-	} `json:"volSync,omitempty"`
+	VolSync VolSyncConfig `json:"volSync,omitempty"`
 
 	KubeObjectProtection struct {
 		// Disabled is used to disable KubeObjectProtection usage in Ramen.
@@ -144,6 +131,24 @@ type RamenConfig struct {
 		// Velero namespace input
 		VeleroNamespaceName string `json:"veleroNamespaceName,omitempty"`
 	} `json:"kubeObjectProtection,omitempty"`
+}
+
+type VolSyncConfig struct {
+	// Disabled is used to disable VolSync usage in Ramen. Defaults to false.
+	Disabled bool `json:"disabled,omitempty"`
+
+	// Use new rsync-tls mover
+	UseRsyncTLS bool `json:"useRsyncTLS,omitempty"`
+
+	// Default cephFS CSIDriver name used to enable ROX volumes. If this name matches
+	// the PVC's storageclass provisioner, a new storageclass will be created and the
+	// name of it passed to VolSync alongside the readOnly flag access mode.
+	CephFSCSIDriverName string `json:"cephFSCSIDriverName,omitempty"`
+
+	// destinationCopyMethod indicates the method that should be used when syncing
+	// from source to destination. Should be Snapshot/Direct
+	// default: Snapshot
+	DestinationCopyMethod string `json:"destinationCopyMethod,omitempty"`
 }
 
 func init() {

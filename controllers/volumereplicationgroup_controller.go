@@ -327,7 +327,7 @@ func (r *VolumeReplicationGroupReconciler) Reconcile(ctx context.Context, req ct
 	v.ramenConfig = ramenConfig
 	v.volSyncHandler = volsync.NewVSHandler(ctx, r.Client, log, v.instance,
 		v.instance.Spec.Async, cephFSCSIDriverNameOrDefault(v.ramenConfig),
-		volSyncDestinationCopyMethodOrDefault(v.ramenConfig))
+		volSyncDestinationCopyMethodOrDefault(v.ramenConfig), volSyncUseRsyncTLSOrDefault(v.ramenConfig))
 
 	if v.instance.Status.ProtectedPVCs == nil {
 		v.instance.Status.ProtectedPVCs = []ramendrv1alpha1.ProtectedPVC{}

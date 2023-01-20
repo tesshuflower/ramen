@@ -49,7 +49,7 @@ type DRPCInstance struct {
 	drPolicy             *rmn.DRPolicy
 	drClusters           []rmn.DRCluster
 	mcvRequestInProgress bool
-	volSyncDisabled      bool
+	volSyncConfig        *rmn.VolSyncConfig
 	userPlacementRule    *plrv1.PlacementRule
 	drpcPlacementRule    *plrv1.PlacementRule
 	vrgs                 map[string]*rmn.VolumeReplicationGroup
@@ -1106,7 +1106,6 @@ func (d *DRPCInstance) createVRGManifestWork(homeCluster string) error {
 		"Last State:", d.getLastDRState(), "cluster", homeCluster)
 
 	vrg := d.generateVRG(rmn.Primary)
-	vrg.Spec.VolSync.Disabled = d.volSyncDisabled
 
 	annotations := make(map[string]string)
 
@@ -1159,6 +1158,8 @@ func (d *DRPCInstance) generateVRG(repState rmn.ReplicationState) rmn.VolumeRepl
 	d.setVRGAction(&vrg)
 	vrg.Spec.Async = d.generateVRGSpecAsync()
 	vrg.Spec.Sync = d.generateVRGSpecSync()
+
+	vrg.Spec.VolSync.Disabled = d.volSyncConfig.Disabled
 
 	return vrg
 }

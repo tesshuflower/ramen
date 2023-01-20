@@ -67,11 +67,13 @@ type VSHandler struct {
 	volumeSnapshotClassSelector metav1.LabelSelector // volume snapshot classes to be filtered label selector
 	defaultCephFSCSIDriverName  string
 	destinationCopyMethod       volsyncv1alpha1.CopyMethodType
+	useRsyncTLS                 bool
 	volumeSnapshotClassList     *snapv1.VolumeSnapshotClassList
 }
 
 func NewVSHandler(ctx context.Context, client client.Client, log logr.Logger, owner metav1.Object,
 	asyncSpec *ramendrv1alpha1.VRGAsyncSpec, defaultCephFSCSIDriverName string, copyMethod string,
+	useRsyncTLS bool,
 ) *VSHandler {
 	vsHandler := &VSHandler{
 		ctx:                        ctx,
@@ -80,6 +82,7 @@ func NewVSHandler(ctx context.Context, client client.Client, log logr.Logger, ow
 		owner:                      owner,
 		defaultCephFSCSIDriverName: defaultCephFSCSIDriverName,
 		destinationCopyMethod:      volsyncv1alpha1.CopyMethodType(copyMethod),
+		useRsyncTLS:                useRsyncTLS,
 		volumeSnapshotClassList:    nil, // Do not initialize until we need it
 	}
 
@@ -103,9 +106,9 @@ func (v *VSHandler) ReconcileRD(
 	}
 
 	// Pre-allocated shared secret - DRPC will generate and propagate this secret from hub to clusters
-	sshKeysSecretName := GetVolSyncSSHSecretNameFromVRGName(v.owner.GetName())
+	vsReplSecretName := GetVolSyncReplicationSecretNameFromVRGName(v.owner.GetName(), v.useRsyncTLS)
 	// Need to confirm this secret exists on the cluster before proceeding, otherwise volsync will generate it
-	secretExists, err := v.validateSecretAndAddVRGOwnerRef(sshKeysSecretName)
+	secretExists, err := v.validateSecretAndAddVRGOwnerRef(vsReplSecretName)
 	if err != nil || !secretExists {
 		return nil, err
 	}
@@ -125,7 +128,7 @@ func (v *VSHandler) ReconcileRD(
 
 	var rd *volsyncv1alpha1.ReplicationDestination
 
-	rd, err = v.createOrUpdateRD(rdSpec, sshKeysSecretName, copyMethod, dstPVC)
+	rd, err = v.createOrUpdateRD(rdSpec, vsReplSecretName, copyMethod, dstPVC)
 	if err != nil {
 		return nil, err
 	}
@@ -161,8 +164,9 @@ func rdStatusReady(rd *volsyncv1alpha1.ReplicationDestination, log logr.Logger) 
 	return true
 }
 
+//nolint:funlen,gocognit
 func (v *VSHandler) createOrUpdateRD(
-	rdSpec ramendrv1alpha1.VolSyncReplicationDestinationSpec, sshKeysSecretName string,
+	rdSpec ramendrv1alpha1.VolSyncReplicationDestinationSpec, vsReplSecretName string,
 	copyMethod volsyncv1alpha1.CopyMethodType, dstPVC *string) (*volsyncv1alpha1.ReplicationDestination, error,
 ) {
 	l := v.log.WithValues("rdSpec", rdSpec)
@@ -184,6 +188,8 @@ func (v *VSHandler) createOrUpdateRD(
 		},
 	}
 
+	rdNeedsRecreate := false
+
 	op, err := ctrlutil.CreateOrUpdate(v.ctx, v.client, rd, func() error {
 		if err := ctrl.SetControllerReference(v.owner, rd, v.client.Scheme()); err != nil {
 			l.Error(err, "unable to set controller reference")
@@ -193,24 +199,62 @@ func (v *VSHandler) createOrUpdateRD(
 
 		addVRGOwnerLabel(v.owner, rd)
 
-		rd.Spec.Rsync = &volsyncv1alpha1.ReplicationDestinationRsyncSpec{
-			ServiceType: v.getRsyncServiceType(),
-			SSHKeys:     &sshKeysSecretName,
+		rdVolumeOptions := volsyncv1alpha1.ReplicationDestinationVolumeOptions{
+			CopyMethod:              copyMethod,
+			Capacity:                rdSpec.ProtectedPVC.Resources.Requests.Storage(),
+			StorageClassName:        rdSpec.ProtectedPVC.StorageClassName,
+			AccessModes:             pvcAccessModes,
+			VolumeSnapshotClassName: &volumeSnapshotClassName,
+			DestinationPVC:          dstPVC,
+		}
 
-			ReplicationDestinationVolumeOptions: volsyncv1alpha1.ReplicationDestinationVolumeOptions{
-				CopyMethod:              copyMethod,
-				Capacity:                rdSpec.ProtectedPVC.Resources.Requests.Storage(),
-				StorageClassName:        rdSpec.ProtectedPVC.StorageClassName,
-				AccessModes:             pvcAccessModes,
-				VolumeSnapshotClassName: &volumeSnapshotClassName,
-				DestinationPVC:          dstPVC,
-			},
+		if v.useRsyncTLS {
+			if rd.Spec.Rsync != nil {
+				// RD was created when rsyncTLS was false - we should probably delete & recreate this RD
+				rdNeedsRecreate = true
+
+				return nil
+			}
+
+			rd.Spec.RsyncTLS = &volsyncv1alpha1.ReplicationDestinationRsyncTLSSpec{
+				ServiceType: v.getRsyncServiceType(),
+				KeySecret:   &vsReplSecretName,
+
+				// MoverSecurityContext:,
+
+				ReplicationDestinationVolumeOptions: rdVolumeOptions,
+			}
+		} else {
+			if rd.Spec.RsyncTLS != nil {
+				// RD was created when rsyncTLS was true - we should probably delete & recreate this RD
+				rdNeedsRecreate = true
+
+				return nil
+			}
+
+			rd.Spec.Rsync = &volsyncv1alpha1.ReplicationDestinationRsyncSpec{
+				ServiceType: v.getRsyncServiceType(),
+				SSHKeys:     &vsReplSecretName,
+
+				ReplicationDestinationVolumeOptions: rdVolumeOptions,
+			}
 		}
 
 		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%w", err)
+	}
+
+	if rdNeedsRecreate {
+		l.V(1).Info("ReplicationDestination has old rsync spec - config has changed.  Deleting it so it can be recreated")
+
+		delErr := v.client.Delete(v.ctx, rd, client.PropagationPolicy(metav1.DeletePropagationBackground))
+		if delErr != nil {
+			return nil, delErr
+		}
+
+		return nil, fmt.Errorf("deleted ReplicationDestination so it can be recreated")
 	}
 
 	l.V(1).Info("ReplicationDestination createOrUpdate Complete", "op", op)
@@ -263,10 +307,10 @@ func (v *VSHandler) ReconcileRS(rsSpec ramendrv1alpha1.VolSyncReplicationSourceS
 	}
 
 	// Pre-allocated shared secret - DRPC will generate and propagate this secret from hub to clusters
-	sshKeysSecretName := GetVolSyncSSHSecretNameFromVRGName(v.owner.GetName())
+	vsReplSecretName := GetVolSyncReplicationSecretNameFromVRGName(v.owner.GetName(), v.useRsyncTLS)
 
 	// Need to confirm this secret exists on the cluster before proceeding, otherwise volsync will generate it
-	secretExists, err := v.validateSecretAndAddVRGOwnerRef(sshKeysSecretName)
+	secretExists, err := v.validateSecretAndAddVRGOwnerRef(vsReplSecretName)
 	if err != nil || !secretExists {
 		return false, nil, err
 	}
@@ -285,7 +329,7 @@ func (v *VSHandler) ReconcileRS(rsSpec ramendrv1alpha1.VolSyncReplicationSourceS
 		return false, nil, err
 	}
 
-	replicationSource, err := v.createOrUpdateRS(rsSpec, sshKeysSecretName, runFinalSync)
+	replicationSource, err := v.createOrUpdateRS(rsSpec, vsReplSecretName, runFinalSync)
 	if err != nil {
 		return false, nil, err
 	}
@@ -386,9 +430,9 @@ func (v *VSHandler) cleanupAfterRSFinalSync(rsSpec ramendrv1alpha1.VolSyncReplic
 	return v.deletePVC(rsSpec.ProtectedPVC.Name)
 }
 
-//nolint:funlen
+//nolint:funlen,gocognit,cyclop
 func (v *VSHandler) createOrUpdateRS(rsSpec ramendrv1alpha1.VolSyncReplicationSourceSpec,
-	sshKeysSecretName string, runFinalSync bool) (*volsyncv1alpha1.ReplicationSource, error,
+	vsReplSecretName string, runFinalSync bool) (*volsyncv1alpha1.ReplicationSource, error,
 ) {
 	l := v.log.WithValues("rsSpec", rsSpec, "runFinalSync", runFinalSync)
 
@@ -410,7 +454,7 @@ func (v *VSHandler) createOrUpdateRS(rsSpec ramendrv1alpha1.VolSyncReplicationSo
 
 	// Remote service address created for the ReplicationDestination on the secondary
 	// The secondary namespace will be the same as primary namespace so use the vrg.Namespace
-	remoteAddress := getRemoteServiceNameForRDFromPVCName(rsSpec.ProtectedPVC.Name, v.owner.GetNamespace())
+	remoteAddress := getRemoteServiceNameForRDFromPVCName(rsSpec.ProtectedPVC.Name, v.owner.GetNamespace(), v.useRsyncTLS)
 
 	rs := &volsyncv1alpha1.ReplicationSource{
 		ObjectMeta: metav1.ObjectMeta{
@@ -418,6 +462,8 @@ func (v *VSHandler) createOrUpdateRS(rsSpec ramendrv1alpha1.VolSyncReplicationSo
 			Namespace: v.owner.GetNamespace(),
 		},
 	}
+
+	rsNeedsRecreate := false
 
 	op, err := ctrlutil.CreateOrUpdate(v.ctx, v.client, rs, func() error {
 		if err := ctrl.SetControllerReference(v.owner, rs, v.client.Scheme()); err != nil {
@@ -450,24 +496,61 @@ func (v *VSHandler) createOrUpdateRS(rsSpec ramendrv1alpha1.VolSyncReplicationSo
 			}
 		}
 
-		rs.Spec.Rsync = &volsyncv1alpha1.ReplicationSourceRsyncSpec{
-			SSHKeys: &sshKeysSecretName,
-			Address: &remoteAddress,
+		replicationSourceVolumeOptions := volsyncv1alpha1.ReplicationSourceVolumeOptions{
+			// Always using CopyMethod of snapshot for now - could use 'Clone' CopyMethod for specific
+			// storage classes that support it in the future
+			CopyMethod:              volsyncv1alpha1.CopyMethodSnapshot,
+			VolumeSnapshotClassName: &volumeSnapshotClassName,
+			StorageClassName:        rsSpec.ProtectedPVC.StorageClassName,
+			AccessModes:             rsSpec.ProtectedPVC.AccessModes,
+		}
 
-			ReplicationSourceVolumeOptions: volsyncv1alpha1.ReplicationSourceVolumeOptions{
-				// Always using CopyMethod of snapshot for now - could use 'Clone' CopyMethod for specific
-				// storage classes that support it in the future
-				CopyMethod:              volsyncv1alpha1.CopyMethodSnapshot,
-				VolumeSnapshotClassName: &volumeSnapshotClassName,
-				StorageClassName:        rsSpec.ProtectedPVC.StorageClassName,
-				AccessModes:             rsSpec.ProtectedPVC.AccessModes,
-			},
+		if v.useRsyncTLS {
+			if rs.Spec.Rsync != nil {
+				// RS was created when rsyncTLS was false - we should probably delete & recreate this RS
+				rsNeedsRecreate = true
+
+				return nil
+			}
+			rs.Spec.Rsync = nil
+			rs.Spec.RsyncTLS = &volsyncv1alpha1.ReplicationSourceRsyncTLSSpec{
+				KeySecret: &vsReplSecretName,
+				Address:   &remoteAddress,
+
+				// MoverSecurityContext
+
+				ReplicationSourceVolumeOptions: replicationSourceVolumeOptions,
+			}
+		} else {
+			if rs.Spec.RsyncTLS != nil {
+				// RS was created when rsyncTLS was true - we should probably delete & recreate this RS
+				rsNeedsRecreate = true
+
+				return nil
+			}
+			rs.Spec.Rsync = &volsyncv1alpha1.ReplicationSourceRsyncSpec{
+				SSHKeys: &vsReplSecretName,
+				Address: &remoteAddress,
+
+				ReplicationSourceVolumeOptions: replicationSourceVolumeOptions,
+			}
 		}
 
 		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%w", err)
+	}
+
+	if rsNeedsRecreate {
+		l.V(1).Info("ReplicationSource has old rsync spec - config has changed.  Deleting it so it can be recreated")
+
+		delErr := v.client.Delete(v.ctx, rs, client.PropagationPolicy(metav1.DeletePropagationBackground))
+		if delErr != nil {
+			return nil, delErr
+		}
+
+		return nil, fmt.Errorf("deleted ReplicationDestination so it can be recreated")
 	}
 
 	l.V(1).Info("ReplicationSource createOrUpdate Complete", "op", op)
@@ -753,7 +836,8 @@ func (v *VSHandler) reconcileServiceExportForRD(rd *volsyncv1alpha1.ReplicationD
 	svcExport := &unstructured.Unstructured{}
 	svcExport.Object = map[string]interface{}{
 		"metadata": map[string]interface{}{
-			"name":      getLocalServiceNameForRD(rd.GetName()), // Get name of the local service (this needs to be exported)
+			// Name of the local service (this needs to be exported)
+			"name":      getLocalServiceNameForRD(rd.GetName(), v.useRsyncTLS),
 			"namespace": rd.GetNamespace(),
 		},
 	}
@@ -1533,19 +1617,24 @@ func getReplicationSourceName(pvcName string) string {
 }
 
 // Service name that VolSync will create locally in the same namespace as the ReplicationDestination
-func getLocalServiceNameForRDFromPVCName(pvcName string) string {
-	return getLocalServiceNameForRD(getReplicationDestinationName(pvcName))
+func getLocalServiceNameForRDFromPVCName(pvcName string, useRsyncTLS bool) string {
+	return getLocalServiceNameForRD(getReplicationDestinationName(pvcName), useRsyncTLS)
 }
 
-func getLocalServiceNameForRD(rdName string) string {
+func getLocalServiceNameForRD(rdName string, useRsyncTLS bool) string {
 	// This is the name VolSync will use for the service
+	if useRsyncTLS {
+		return fmt.Sprintf("volsync-rsync-tls-dst-%s", rdName)
+	}
+
 	return fmt.Sprintf("volsync-rsync-dst-%s", rdName)
 }
 
 // This is the remote service name that can be accessed from another cluster.  This assumes submariner and that
 // a ServiceExport is created for the service on the cluster that has the ReplicationDestination
-func getRemoteServiceNameForRDFromPVCName(pvcName, rdNamespace string) string {
-	return fmt.Sprintf("%s.%s.svc.clusterset.local", getLocalServiceNameForRDFromPVCName(pvcName), rdNamespace)
+func getRemoteServiceNameForRDFromPVCName(pvcName, rdNamespace string, useRsyncTLS bool) string {
+	return fmt.Sprintf("%s.%s.svc.clusterset.local",
+		getLocalServiceNameForRDFromPVCName(pvcName, useRsyncTLS), rdNamespace)
 }
 
 func getKindAndName(scheme *runtime.Scheme, obj client.Object) string {

@@ -15,7 +15,7 @@ import (
 func (d *DRPCInstance) EnsureVolSyncReplicationSetup(homeCluster string) error {
 	d.log.Info(fmt.Sprintf("Ensure VolSync replication has been setup for cluster %s", homeCluster))
 
-	if d.volSyncDisabled {
+	if d.volSyncConfig.Disabled {
 		d.log.Info("VolSync is disabled")
 
 		return nil
@@ -60,12 +60,17 @@ func (d *DRPCInstance) ensureVolSyncReplicationCommon(srcCluster string) error {
 	}
 
 	// Now we should have a source and destination VRG created
-	// Since we will use VolSync - create/ensure & propagate a shared ssh rsync secret to both the src and dst clusters
-	sshSecretNameHub := fmt.Sprintf("%s-vs-secret-hub", d.instance.GetName())
+	// Since we will use VolSync - create/ensure & propagate a shared rsync secret to both the src and dst clusters
+	vsReplSecretNameCluster := volsync.GetVolSyncReplicationSecretNameFromVRGName(d.instance.GetName(),
+		d.volSyncConfig.UseRsyncTLS) // VRG name == DRPC name
+
+	// Name hub secret differently in case the hub is used as one of the mgd clusters
+	// The hub secret will get propagated to the mgd clusters and use the "vsReplSecretNameCluster" name.
+	vsReplSecretNameHub := fmt.Sprintf("%s-hub", vsReplSecretNameCluster)
 
 	// Ensure/Create the secret on the hub
-	sshSecretHub, err := volsync.ReconcileVolSyncReplicationSecret(d.ctx, d.reconciler.Client, d.instance,
-		sshSecretNameHub, d.instance.GetNamespace(), d.log)
+	vsReplSecretHub, err := volsync.ReconcileVolSyncReplicationSecret(d.ctx, d.reconciler.Client, d.instance,
+		vsReplSecretNameHub, d.instance.GetNamespace(), d.volSyncConfig.UseRsyncTLS, d.log)
 	if err != nil {
 		d.log.Error(err, "Unable to create ssh secret on hub for VolSync")
 
@@ -73,16 +78,14 @@ func (d *DRPCInstance) ensureVolSyncReplicationCommon(srcCluster string) error {
 	}
 
 	// Propagate the secret to all clusters (to be named sshSecretNameCluster on the clusters)
-	// Note that VRG spec will not contain the ssh secret name, we're going to name based on the VRG name itself
-	sshSecretNameCluster := volsync.GetVolSyncSSHSecretNameFromVRGName(d.instance.GetName()) // VRG name == DRPC name
-
+	// Note that VRG spec will not contain the secret name, we're going to name based on the VRG name itself
 	clustersToPropagateSecret := []string{}
 	for clusterName := range d.vrgs {
 		clustersToPropagateSecret = append(clustersToPropagateSecret, clusterName)
 	}
 
-	err = volsync.PropagateSecretToClusters(d.ctx, d.reconciler.Client, sshSecretHub,
-		d.instance, clustersToPropagateSecret, sshSecretNameCluster, d.instance.GetNamespace(), d.log)
+	err = volsync.PropagateSecretToClusters(d.ctx, d.reconciler.Client, vsReplSecretHub,
+		d.instance, clustersToPropagateSecret, vsReplSecretNameCluster, d.instance.GetNamespace(), d.log)
 	if err != nil {
 		d.log.Error(err, "Error propagating secret to clusters", "clustersToPropagateSecret", clustersToPropagateSecret)
 
@@ -182,7 +185,7 @@ func (d *DRPCInstance) updateDestinationVRG(clusterName string, srcVRG *rmn.Volu
 }
 
 func (d *DRPCInstance) IsVolSyncReplicationRequired(homeCluster string) (bool, error) {
-	if d.volSyncDisabled {
+	if d.volSyncConfig.Disabled {
 		d.log.Info("VolSync is disabled")
 
 		return false, nil
@@ -325,7 +328,7 @@ func (d *DRPCInstance) createVolSyncDestManifestWork(srcCluster string) error {
 }
 
 func (d *DRPCInstance) ResetVolSyncRDOnPrimary(clusterName string) error {
-	if d.volSyncDisabled {
+	if d.volSyncConfig.Disabled {
 		d.log.Info("VolSync is disabled")
 
 		return nil

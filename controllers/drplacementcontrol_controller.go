@@ -438,7 +438,7 @@ func (r *DRPlacementControlReconciler) createDRPCInstance(ctx context.Context,
 		drPolicy:          drPolicy,
 		drClusters:        drClusters,
 		vrgs:              vrgs,
-		volSyncDisabled:   ramenConfig.VolSync.Disabled,
+		volSyncConfig:     &ramenConfig.VolSync,
 		mwu: rmnutil.MWUtil{
 			Client:        r.Client,
 			Ctx:           ctx,
@@ -450,7 +450,7 @@ func (r *DRPlacementControlReconciler) createDRPCInstance(ctx context.Context,
 
 	isMetro, _ := dRPolicySupportsMetro(drPolicy, drClusters)
 	if isMetro {
-		d.volSyncDisabled = true
+		d.volSyncConfig.Disabled = true
 
 		log.Info("volsync is set to disabled")
 	}

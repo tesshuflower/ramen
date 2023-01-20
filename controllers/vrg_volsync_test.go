@@ -298,10 +298,12 @@ var _ = Describe("VolumeReplicationGroupVolSyncController", func() {
 					}, rd1)).To(Succeed())
 				})
 
+				// FIXME: need tests for rsync-tls
 				It("Should create ReplicationDestinations for each", func() {
 					Expect(rd0.Spec.Trigger).To(BeNil()) // Rsync, so destination will not have schedule
 					Expect(rd0.Spec.Rsync).NotTo(BeNil())
-					Expect(*rd0.Spec.Rsync.SSHKeys).To(Equal(volsync.GetVolSyncSSHSecretNameFromVRGName(testVrg.GetName())))
+					Expect(*rd0.Spec.Rsync.SSHKeys).To(Equal(
+						volsync.GetVolSyncReplicationSecretNameFromVRGName(testVrg.GetName(), false /* rsync ssh */)))
 					Expect(*rd0.Spec.Rsync.StorageClassName).To(Equal(testStorageClassName))
 					Expect(rd0.Spec.Rsync.AccessModes).To(Equal(testAccessModes))
 					Expect(rd0.Spec.Rsync.CopyMethod).To(Equal(volsyncv1alpha1.CopyMethodSnapshot))
@@ -309,7 +311,8 @@ var _ = Describe("VolumeReplicationGroupVolSyncController", func() {
 
 					Expect(rd1.Spec.Trigger).To(BeNil()) // Rsync, so destination will not have schedule
 					Expect(rd1.Spec.Rsync).NotTo(BeNil())
-					Expect(*rd1.Spec.Rsync.SSHKeys).To(Equal(volsync.GetVolSyncSSHSecretNameFromVRGName(testVrg.GetName())))
+					Expect(*rd1.Spec.Rsync.SSHKeys).To(Equal(
+						volsync.GetVolSyncReplicationSecretNameFromVRGName(testVrg.GetName(), false /* rsync ssh */)))
 					Expect(*rd1.Spec.Rsync.StorageClassName).To(Equal(testStorageClassName))
 					Expect(rd1.Spec.Rsync.AccessModes).To(Equal(testAccessModes))
 					Expect(rd1.Spec.Rsync.CopyMethod).To(Equal(volsyncv1alpha1.CopyMethodSnapshot))
@@ -418,10 +421,11 @@ func createPVCBoundToRunningPod(ctx context.Context, namespace string,
 	return pvc
 }
 
+// FIXME: need tests for rsync-tls
 func createSecret(vrgName, namespace string) {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      volsync.GetVolSyncSSHSecretNameFromVRGName(vrgName),
+			Name:      volsync.GetVolSyncReplicationSecretNameFromVRGName(vrgName, false /* rsync over ssh */),
 			Namespace: namespace,
 		},
 	}

@@ -54,52 +54,86 @@ var _ = Describe("Secretgen", func() {
 	})
 
 	Describe("Reconcile volsync rsync secret", func() {
-		testSecretName := "test-secret-abc"
+		testSSHSecretName := "test-secret-rsync"
+		testTLSSecretName := "test-secret-rsync-tls-psk"
 
 		JustBeforeEach(func() {
-			testSecret, err := volsync.ReconcileVolSyncReplicationSecret(ctx, k8sClient, owner,
-				testSecretName, testNamespace.GetName(), logger)
+			testSSHSecret, err := volsync.ReconcileVolSyncReplicationSecret(ctx, k8sClient, owner,
+				testSSHSecretName, testNamespace.GetName(), false /* old rsync ssh mover */, logger)
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(testSecret.GetName()).To(Equal(testSecretName))
-			Expect(testSecret.GetNamespace()).To(Equal(testNamespace.GetName()))
+			Expect(testSSHSecret.GetName()).To(Equal(testSSHSecretName))
+			Expect(testSSHSecret.GetNamespace()).To(Equal(testNamespace.GetName()))
+
+			testTLSSecret, err := volsync.ReconcileVolSyncReplicationSecret(ctx, k8sClient, owner,
+				testTLSSecretName, testNamespace.GetName(), true /* new rsync-tls mover */, logger)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(testTLSSecret.GetName()).To(Equal(testTLSSecretName))
+			Expect(testTLSSecret.GetNamespace()).To(Equal(testNamespace.GetName()))
 		})
 
 		Context("When the secret does not previously exist", func() {
 			It("Should create a volsync rsync secret", func() {
+				//
+				// Validate Rsync SSH secret has been created properly
+				//
 				// Re-load secret to make sure it's been created properly
-				newSecret := &corev1.Secret{}
+				newSSHSecret := &corev1.Secret{}
 				Eventually(func() error {
 					return k8sClient.Get(ctx,
-						types.NamespacedName{Name: testSecretName, Namespace: testNamespace.GetName()}, newSecret)
+						types.NamespacedName{Name: testSSHSecretName, Namespace: testNamespace.GetName()}, newSSHSecret)
 				}, maxWait, interval).Should(Succeed())
 
 				// Expect the secret should be owned by owner
-				Expect(ownerMatches(newSecret, owner.GetName(), "ConfigMap", true))
+				Expect(ownerMatches(newSSHSecret, owner.GetName(), "ConfigMap", true))
 
 				// Check secret data
-				Expect(len(newSecret.Data)).To(Equal(4))
+				Expect(len(newSSHSecret.Data)).To(Equal(4))
 
-				sourceBytes, ok := newSecret.Data["source"]
+				sourceBytes, ok := newSSHSecret.Data["source"]
 				Expect(ok).To(BeTrue())
-				sourcePubBytes, ok := newSecret.Data["source.pub"]
+				sourcePubBytes, ok := newSSHSecret.Data["source.pub"]
 				Expect(ok).To(BeTrue())
 				validateKeyPair(sourceBytes, sourcePubBytes)
 
-				destBytes, ok := newSecret.Data["destination"]
+				destBytes, ok := newSSHSecret.Data["destination"]
 				Expect(ok).To(BeTrue())
-				destPubBytes, ok := newSecret.Data["destination.pub"]
+				destPubBytes, ok := newSSHSecret.Data["destination.pub"]
 				Expect(ok).To(BeTrue())
 				validateKeyPair(destBytes, destPubBytes)
+
+				//
+				// Validate Rsync-TLS secret has been created properly
+				//
+				// Re-load the rsync-tls secret to make sure it's been created properly
+				newTLSSecret := &corev1.Secret{}
+				Eventually(func() error {
+					return k8sClient.Get(ctx,
+						types.NamespacedName{Name: testTLSSecretName, Namespace: testNamespace.GetName()}, newTLSSecret)
+				}, maxWait, interval).Should(Succeed())
+
+				// Expect the secret should be owned by owner
+				Expect(ownerMatches(newTLSSecret, owner.GetName(), "ConfigMap", true))
+
+				// Check secret data
+				Expect(len(newTLSSecret.Data)).To(Equal(1))
+
+				tlsPskData, ok := newTLSSecret.Data["psk.txt"]
+				Expect(ok).To(BeTrue())
+
+				tlsPsk := string(tlsPskData)
+				Expect(tlsPsk).To(ContainSubstring("volsyncramen:"))
 			})
 		})
 
 		Context("When the secret already exists", func() {
-			var existingSecret *corev1.Secret
+			var existingSSHSecret *corev1.Secret
+			var existingTLSSecret *corev1.Secret
 			BeforeEach(func() {
-				existingSecret = &corev1.Secret{
+				existingSSHSecret = &corev1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      testSecretName,
+						Name:      testSSHSecretName,
 						Namespace: testNamespace.GetName(),
 					},
 					StringData: map[string]string{
@@ -107,23 +141,47 @@ var _ = Describe("Secretgen", func() {
 						"anotherkey": "anothervalue",
 					},
 				}
-				Expect(k8sClient.Create(ctx, existingSecret)).To(Succeed())
+				Expect(k8sClient.Create(ctx, existingSSHSecret)).To(Succeed())
 
 				// Make sure secret has been created, and in client cache
 				Eventually(func() error {
-					return k8sClient.Get(ctx, client.ObjectKeyFromObject(existingSecret), existingSecret)
+					return k8sClient.Get(ctx, client.ObjectKeyFromObject(existingSSHSecret), existingSSHSecret)
+				}, maxWait, interval).Should(Succeed())
+
+				existingTLSSecret = &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      testTLSSecretName,
+						Namespace: testNamespace.GetName(),
+					},
+					StringData: map[string]string{
+						"psk.txt": "testing1:6063bb702a13a6c237e56b2f6bd9e3014699e0cec6b3e5d1844ee5f2d2d545e4",
+					},
+				}
+				Expect(k8sClient.Create(ctx, existingTLSSecret)).To(Succeed())
+
+				// Make sure secret has been created, and in client cache
+				Eventually(func() error {
+					return k8sClient.Get(ctx, client.ObjectKeyFromObject(existingTLSSecret), existingTLSSecret)
 				}, maxWait, interval).Should(Succeed())
 			})
 
 			It("Should leave the existing secret unchanged", func() {
 				// Re-load secret to make sure it's been created properly
-				secret := &corev1.Secret{}
+				sshSecret := &corev1.Secret{}
 				Eventually(func() error {
 					return k8sClient.Get(ctx,
-						types.NamespacedName{Name: testSecretName, Namespace: testNamespace.GetName()}, secret)
+						types.NamespacedName{Name: testSSHSecretName, Namespace: testNamespace.GetName()}, sshSecret)
 				}, maxWait, interval).Should(Succeed())
 
-				Expect(secret.Data).To(Equal(existingSecret.Data))
+				Expect(sshSecret.Data).To(Equal(existingSSHSecret.Data))
+
+				tlsSecret := &corev1.Secret{}
+				Eventually(func() error {
+					return k8sClient.Get(ctx,
+						types.NamespacedName{Name: testTLSSecretName, Namespace: testNamespace.GetName()}, tlsSecret)
+				}, maxWait, interval).Should(Succeed())
+
+				Expect(tlsSecret.Data).To(Equal(existingTLSSecret.Data))
 			})
 		})
 	})

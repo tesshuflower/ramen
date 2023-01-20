@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 
@@ -22,12 +23,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+const tlsPSKDataSize = 64
+
 const keyBitSize = 4096
 
 // Creates a new volsync replication secret on the cluster (should be called on the hub cluster).  If the secret
 // already exists, nop
 func ReconcileVolSyncReplicationSecret(ctx context.Context, k8sClient client.Client, ownerObject metav1.Object,
-	secretName, secretNamespace string, log logr.Logger) (*corev1.Secret, error,
+	secretName, secretNamespace string, useRsyncTLS bool, log logr.Logger) (*corev1.Secret, error,
 ) {
 	existingSecret := &corev1.Secret{}
 	// See if it exists already
@@ -42,7 +45,7 @@ func ReconcileVolSyncReplicationSecret(ctx context.Context, k8sClient client.Cli
 		return existingSecret, nil
 	}
 
-	secret, err := generateNewVolSyncReplicationSecret(secretName, secretNamespace, log)
+	secret, err := generateNewVolSyncReplicationSecret(secretName, secretNamespace, useRsyncTLS, log)
 	if err != nil {
 		return nil, err
 	}
@@ -65,10 +68,56 @@ func ReconcileVolSyncReplicationSecret(ctx context.Context, k8sClient client.Cli
 	return secret, nil
 }
 
-func generateNewVolSyncReplicationSecret(secretName, secretNamespace string, log logr.Logger) (*corev1.Secret, error) {
+func generateNewVolSyncReplicationSecret(secretName, secretNamespace string, useRsyncTLS bool,
+	log logr.Logger) (*corev1.Secret, error,
+) {
+	if useRsyncTLS {
+		return generateNewVolSyncTLSReplicationSecret(secretName, secretNamespace, log)
+	}
+
+	return generateNewVolSyncSSHReplicationSecret(secretName, secretNamespace, log)
+}
+
+// For rsync TLS mover
+func generateNewVolSyncTLSReplicationSecret(secretName, secretNamespace string, log logr.Logger) (*corev1.Secret, error,
+) {
+	tlsKey, err := genTLSPreSharedKey(log)
+	if err != nil {
+		log.Error(err, "Unable to generate new tls secret for VolSync replication")
+
+		return nil, err
+	}
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: secretNamespace,
+		},
+		StringData: map[string]string{
+			"psk.txt": "volsyncramen:" + tlsKey,
+		},
+	}
+
+	return secret, nil
+}
+
+func genTLSPreSharedKey(log logr.Logger) (string, error) {
+	pskData := make([]byte, tlsPSKDataSize)
+	if _, err := rand.Read(pskData); err != nil {
+		log.Error(err, "error generating tls key")
+
+		return "", err
+	}
+
+	return hex.EncodeToString(pskData), nil
+}
+
+// For rsync over ssh (legacy)
+func generateNewVolSyncSSHReplicationSecret(secretName, secretNamespace string, log logr.Logger) (*corev1.Secret, error,
+) {
 	priv, pub, err := generateKeyPair(log)
 	if err != nil {
-		log.Error(err, "Unable to generate new secret for VolSync replication")
+		log.Error(err, "Unable to generate new ssh secret for VolSync replication")
 
 		return nil, err
 	}

@@ -21,7 +21,19 @@ import (
 	plrulev1 "github.com/stolostron/multicloud-operators-placementrule/pkg/apis/apps/v1"
 )
 
-func GetVolSyncSSHSecretNameFromVRGName(vrgName string) string {
+func GetVolSyncReplicationSecretNameFromVRGName(vrgName string, useRsyncTLS bool) string {
+	if useRsyncTLS {
+		return getVolSyncTLSSecretNameFromVRGName(vrgName)
+	}
+
+	return getVolSyncSSHSecretNameFromVRGName(vrgName)
+}
+
+func getVolSyncTLSSecretNameFromVRGName(vrgName string) string {
+	return fmt.Sprintf("%s-vs-tls-secret", vrgName)
+}
+
+func getVolSyncSSHSecretNameFromVRGName(vrgName string) string {
 	return fmt.Sprintf("%s-vs-secret", vrgName)
 }
 

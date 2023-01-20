@@ -298,3 +298,7 @@ func volSyncDestinationCopyMethodOrDefault(ramenConfig *ramendrv1alpha1.RamenCon
 
 	return ramenConfig.VolSync.DestinationCopyMethod
 }
+
+func volSyncUseRsyncTLSOrDefault(ramenConfig *ramendrv1alpha1.RamenConfig) bool {
+	return ramenConfig.VolSync.UseRsyncTLS // Will be false by default atm
+}

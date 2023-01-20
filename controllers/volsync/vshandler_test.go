@@ -86,7 +86,8 @@ var _ = Describe("VolSync Handler - Volume Replication Class tests", func() {
 			var vsHandler *volsync.VSHandler
 
 			BeforeEach(func() {
-				vsHandler = volsync.NewVSHandler(ctx, k8sClient, logger, nil, asyncSpec, "none", "Snapshot")
+				vsHandler = volsync.NewVSHandler(ctx, k8sClient, logger, nil, asyncSpec, "none", "Snapshot",
+					false /* rsync ssh */)
 			})
 
 			It("GetVolumeSnapshotClasses() should find all volume snapshot classes", func() {
@@ -115,7 +116,8 @@ var _ = Describe("VolSync Handler - Volume Replication Class tests", func() {
 					},
 				}
 
-				vsHandler = volsync.NewVSHandler(ctx, k8sClient, logger, nil, asyncSpec, "none", "Snapshot")
+				vsHandler = volsync.NewVSHandler(ctx, k8sClient, logger, nil, asyncSpec, "none", "Snapshot",
+					false /* rsync ssh */)
 			})
 
 			It("GetVolumeSnapshotClasses() should find matching volume snapshot classes", func() {
@@ -158,7 +160,8 @@ var _ = Describe("VolSync Handler - Volume Replication Class tests", func() {
 					},
 				}
 
-				vsHandler = volsync.NewVSHandler(ctx, k8sClient, logger, nil, asyncSpec, "none", "Snapshot")
+				vsHandler = volsync.NewVSHandler(ctx, k8sClient, logger, nil, asyncSpec, "none", "Snapshot",
+					true /* rsync tls */)
 			})
 
 			It("GetVolumeSnapshotClasses() should find matching volume snapshot classes", func() {
@@ -214,8 +217,9 @@ var _ = Describe("VolSync Handler - Volume Replication Class tests", func() {
 			}
 
 			// Initialize a vshandler
+			// FIXME: need tests for rsync-tls
 			vsHandler = volsync.NewVSHandler(ctx, k8sClient, logger, nil, asyncSpec,
-				"openshift-storage.cephfs.csi.ceph.com", "Snapshot")
+				"openshift-storage.cephfs.csi.ceph.com", "Snapshot", false /* rsync ssh */)
 		})
 
 		JustBeforeEach(func() {
@@ -430,7 +434,9 @@ var _ = Describe("VolSync Handler", func() {
 		Expect(ownerCm.GetName()).NotTo(BeEmpty())
 		owner = ownerCm
 
-		vsHandler = volsync.NewVSHandler(ctx, k8sClient, logger, owner, asyncSpec, "none", "Snapshot")
+		// FIXME: need tests for rsync-tls
+		vsHandler = volsync.NewVSHandler(ctx, k8sClient, logger, owner, asyncSpec, "none", "Snapshot",
+			false /* rsync ssh */)
 	})
 
 	AfterEach(func() {
@@ -485,7 +491,8 @@ var _ = Describe("VolSync Handler", func() {
 					// Create a dummy volsync ssh secret so the reconcile can proceed properly
 					dummySSHSecret = &corev1.Secret{
 						ObjectMeta: metav1.ObjectMeta{
-							Name:      volsync.GetVolSyncSSHSecretNameFromVRGName(owner.GetName()),
+							// FIXME: need tests for rsync-tls
+							Name:      volsync.GetVolSyncReplicationSecretNameFromVRGName(owner.GetName(), false),
 							Namespace: testNamespace.GetName(),
 						},
 					}
@@ -561,7 +568,8 @@ var _ = Describe("VolSync Handler", func() {
 						// Check common fields
 						Expect(createdRD.Spec.Rsync.CopyMethod).To(Equal(volsyncv1alpha1.CopyMethodSnapshot))
 						// Note owner here is faking out a VRG - ssh key name will be based on the owner (VRG) name
-						Expect(*createdRD.Spec.Rsync.SSHKeys).To(Equal(volsync.GetVolSyncSSHSecretNameFromVRGName(owner.GetName())))
+						Expect(*createdRD.Spec.Rsync.SSHKeys).To(Equal(
+							volsync.GetVolSyncReplicationSecretNameFromVRGName(owner.GetName(), false)))
 						Expect(*createdRD.Spec.Rsync.Capacity).To(Equal(capacity))
 						Expect(createdRD.Spec.Rsync.AccessModes).To(Equal([]corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}))
 						Expect(*createdRD.Spec.Rsync.StorageClassName).To(Equal(testStorageClassName))
@@ -680,7 +688,9 @@ var _ = Describe("VolSync Handler", func() {
 				var vsHandler *volsync.VSHandler
 
 				BeforeEach(func() {
-					vsHandler = volsync.NewVSHandler(ctx, k8sClient, logger, owner, asyncSpec, "none", "Direct")
+					// FIXME: need tests for rsync-tls
+					vsHandler = volsync.NewVSHandler(ctx, k8sClient, logger, owner, asyncSpec, "none", "Direct",
+						false /* rsync ssh */)
 				})
 
 				It("SelectDestCopyMethod() should return CopyMethod Snapshot and App PVC name", func() {
@@ -753,7 +763,9 @@ var _ = Describe("VolSync Handler", func() {
 					// Create a dummy volsync ssh secret so the reconcile can proceed properly
 					dummySSHSecret = &corev1.Secret{
 						ObjectMeta: metav1.ObjectMeta{
-							Name:      volsync.GetVolSyncSSHSecretNameFromVRGName(owner.GetName()),
+							// FIXME: need tests for rsync-tls
+							Name: volsync.GetVolSyncReplicationSecretNameFromVRGName(owner.GetName(),
+								false /* rsync ssh */),
 							Namespace: testNamespace.GetName(),
 						},
 					}
@@ -934,7 +946,8 @@ var _ = Describe("VolSync Handler", func() {
 							Expect(createdRS.Spec.SourcePVC).To(Equal(rsSpec.ProtectedPVC.Name))
 							Expect(createdRS.Spec.Rsync.CopyMethod).To(Equal(volsyncv1alpha1.CopyMethodSnapshot))
 							// Note owner here is faking out a VRG - ssh key name will be based on the owner (VRG) name
-							Expect(*createdRS.Spec.Rsync.SSHKeys).To(Equal(volsync.GetVolSyncSSHSecretNameFromVRGName(owner.GetName())))
+							Expect(*createdRS.Spec.Rsync.SSHKeys).To(Equal(
+								volsync.GetVolSyncReplicationSecretNameFromVRGName(owner.GetName(), false)))
 							Expect(*createdRS.Spec.Rsync.Address).To(Equal("volsync-rsync-dst-" +
 								rsSpec.ProtectedPVC.Name + "." + testNamespace.GetName() + ".svc.clusterset.local"))
 
@@ -1472,8 +1485,9 @@ var _ = Describe("VolSync Handler", func() {
 			}
 			Expect(k8sClient.Create(ctx, otherOwnerCm)).To(Succeed())
 			Expect(otherOwnerCm.GetName()).NotTo(BeEmpty())
+			// FIXME: need tests for rsync-tls
 			otherVSHandler := volsync.NewVSHandler(ctx, k8sClient, logger, otherOwnerCm, asyncSpec,
-				"none", "Snapshot")
+				"none", "Snapshot", false /* rsync ssh */)
 
 			for i := 0; i < 2; i++ {
 				otherOwnerRdSpec := ramendrv1alpha1.VolSyncReplicationDestinationSpec{
@@ -1494,7 +1508,7 @@ var _ = Describe("VolSync Handler", func() {
 			// Create dummy volsync ssh secrets - will need one per vrg
 			dummySSHSecret := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      volsync.GetVolSyncSSHSecretNameFromVRGName(owner.GetName()),
+					Name:      volsync.GetVolSyncReplicationSecretNameFromVRGName(owner.GetName(), false),
 					Namespace: testNamespace.GetName(),
 				},
 			}
@@ -1512,7 +1526,7 @@ var _ = Describe("VolSync Handler", func() {
 
 			dummySSHSecretOtherOwner := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      volsync.GetVolSyncSSHSecretNameFromVRGName(otherOwnerCm.GetName()),
+					Name:      volsync.GetVolSyncReplicationSecretNameFromVRGName(otherOwnerCm.GetName(), false),
 					Namespace: testNamespace.GetName(),
 				},
 			}
@@ -1662,8 +1676,9 @@ var _ = Describe("VolSync Handler", func() {
 			}
 			Expect(k8sClient.Create(ctx, otherOwnerCm)).To(Succeed())
 			Expect(otherOwnerCm.GetName()).NotTo(BeEmpty())
+			// FIXME: need tests for rsync-tls
 			otherVSHandler := volsync.NewVSHandler(ctx, k8sClient, logger, otherOwnerCm, asyncSpec,
-				"none", "Snapshot")
+				"none", "Snapshot", false /* rsync ssh */)
 
 			for i := 0; i < 2; i++ {
 				otherOwnerRsSpec := ramendrv1alpha1.VolSyncReplicationSourceSpec{
@@ -1679,7 +1694,7 @@ var _ = Describe("VolSync Handler", func() {
 			// Create dummy volsync ssh secrets - will need one per vrg
 			dummySSHSecret := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      volsync.GetVolSyncSSHSecretNameFromVRGName(owner.GetName()),
+					Name:      volsync.GetVolSyncReplicationSecretNameFromVRGName(owner.GetName(), false),
 					Namespace: testNamespace.GetName(),
 				},
 			}
@@ -1697,7 +1712,7 @@ var _ = Describe("VolSync Handler", func() {
 
 			dummySSHSecretOtherOwner := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      volsync.GetVolSyncSSHSecretNameFromVRGName(otherOwnerCm.GetName()),
+					Name:      volsync.GetVolSyncReplicationSecretNameFromVRGName(otherOwnerCm.GetName(), false),
 					Namespace: testNamespace.GetName(),
 				},
 			}
