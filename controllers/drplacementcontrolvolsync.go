@@ -59,10 +59,11 @@ func (d *DRPCInstance) ensureVolSyncReplicationCommon(srcCluster string) error {
 		return fmt.Errorf("failed to find source VolSync VRG in cluster %s. VRGs %v", srcCluster, d.vrgs)
 	}
 
+	useRsyncTLS := volSyncUseRsyncTLSOrDefaultFromVolSyncConfig(d.volSyncConfig)
+
 	// Now we should have a source and destination VRG created
 	// Since we will use VolSync - create/ensure & propagate a shared rsync secret to both the src and dst clusters
-	vsReplSecretNameCluster := volsync.GetVolSyncReplicationSecretNameFromVRGName(d.instance.GetName(),
-		d.volSyncConfig.UseRsyncTLS) // VRG name == DRPC name
+	vsReplSecretNameCluster := volsync.GetVolSyncReplicationSecretNameFromVRGName(d.instance.GetName(), useRsyncTLS)
 
 	// Name hub secret differently in case the hub is used as one of the mgd clusters
 	// The hub secret will get propagated to the mgd clusters and use the "vsReplSecretNameCluster" name.
@@ -70,7 +71,7 @@ func (d *DRPCInstance) ensureVolSyncReplicationCommon(srcCluster string) error {
 
 	// Ensure/Create the secret on the hub
 	vsReplSecretHub, err := volsync.ReconcileVolSyncReplicationSecret(d.ctx, d.reconciler.Client, d.instance,
-		vsReplSecretNameHub, d.instance.GetNamespace(), d.volSyncConfig.UseRsyncTLS, d.log)
+		vsReplSecretNameHub, d.instance.GetNamespace(), useRsyncTLS, d.log)
 	if err != nil {
 		d.log.Error(err, "Unable to create ssh secret on hub for VolSync")
 

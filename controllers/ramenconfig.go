@@ -300,5 +300,10 @@ func volSyncDestinationCopyMethodOrDefault(ramenConfig *ramendrv1alpha1.RamenCon
 }
 
 func volSyncUseRsyncTLSOrDefault(ramenConfig *ramendrv1alpha1.RamenConfig) bool {
-	return ramenConfig.VolSync.UseRsyncTLS // Will be false by default atm
+	return volSyncUseRsyncTLSOrDefaultFromVolSyncConfig(&ramenConfig.VolSync)
+}
+
+func volSyncUseRsyncTLSOrDefaultFromVolSyncConfig(volSyncConfig *ramendrv1alpha1.VolSyncConfig) bool {
+	// Defaulting to rsync (not rsync-tls) for now
+	return volSyncConfig.Mover == ramendrv1alpha1.VolSyncMoverRsyncTLS
 }

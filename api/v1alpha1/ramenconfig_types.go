@@ -137,8 +137,8 @@ type VolSyncConfig struct {
 	// Disabled is used to disable VolSync usage in Ramen. Defaults to false.
 	Disabled bool `json:"disabled,omitempty"`
 
-	// Use new rsync-tls mover
-	UseRsyncTLS bool `json:"useRsyncTLS,omitempty"`
+	// mover designates the VolSync mover to use.  Currently supported types are rsync and rsync-tls.
+	Mover VolSyncMover `json:"mover,omitempty"`
 
 	// Default cephFS CSIDriver name used to enable ROX volumes. If this name matches
 	// the PVC's storageclass provisioner, a new storageclass will be created and the
@@ -150,6 +150,13 @@ type VolSyncConfig struct {
 	// default: Snapshot
 	DestinationCopyMethod string `json:"destinationCopyMethod,omitempty"`
 }
+
+type VolSyncMover string
+
+const (
+	VolSyncMoverRsync    VolSyncMover = "rsync"
+	VolSyncMoverRsyncTLS VolSyncMover = "rsync-tls"
+)
 
 func init() {
 	SchemeBuilder.Register(&RamenConfig{})
