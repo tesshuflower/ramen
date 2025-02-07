@@ -6,6 +6,7 @@ package volsync
 import (
 	"context"
 	"fmt"
+	"hash/crc32"
 	"strconv"
 	"strings"
 
@@ -2007,7 +2008,7 @@ func getLocalServiceNameForRDFromPVCName(pvcName string) string {
 
 func getLocalServiceNameForRD(rdName string) string {
 	// This is the name VolSync will use for the service
-	return fmt.Sprintf("volsync-rsync-tls-dst-%s", rdName)
+	return getShortName("volsync-rsync-tls-dst-", rdName)
 }
 
 // This is the remote service name that can be accessed from another cluster.  This assumes submariner and that
@@ -2552,7 +2553,7 @@ func (v *VSHandler) removeOCMAnnotationsAndUpdate(obj client.Object) error {
 func (v *VSHandler) IsActiveJobPresent(name, namespace string) (bool, error) {
 	namespacedName := types.NamespacedName{
 		Namespace: namespace,
-		Name:      fmt.Sprintf("volsync-rsync-tls-src-%s", name),
+		Name:      getShortName("volsync-rsync-tls-src-", name),
 	}
 
 	job := &batchv1.Job{}
@@ -2596,4 +2597,15 @@ func updateClaimRef(pv *corev1.PersistentVolume, name, namespace string) {
 		pv.Spec.ClaimRef.Name = name
 		pv.Spec.ClaimRef.Namespace = namespace
 	}
+}
+
+// Returns the expected name from volsync
+// If the prefix + crName is > 63 chars volsync will use a crc32 hash of the
+// crName instead of the crName itself
+func getShortName(prefix, crName string) string {
+	name := prefix + crName
+	if len(name) > 63 {
+		return prefix + fmt.Sprintf("%08x", crc32.ChecksumIEEE([]byte(name)))
+	}
+	return name
 }
